@@ -38,6 +38,7 @@ export const defaults = {
   headless: true,
   chromiumSandbox: true,
   userAgentSuffix: '',
+  locale: '',
 
   blocklist: [
     '/https?:\/\/localhost/', // eslint-disable-line
@@ -113,6 +114,21 @@ export function filterOptions (newOptions = {}) {
       options[key] = key in newOptions ? newOptions[key] : defaults[key]
     } catch (_err) { // `key in newOptions` may throw if `newOptions` is not object-like
       options[key] = defaults[key]
+    }
+
+    // Check locale before coercion so arrays and booleans cannot become tags.
+    if (key === 'locale') {
+      if (options[key] === undefined) options[key] = defaults[key]
+      const locale = options[key]
+      const expected = '"locale" must be a primitive string containing a single language tag accepted by Intl (for example "es-ES"), or "" for no override; lists, weights and whitespace are not supported.'
+      if (typeof locale !== 'string') throw new Error(expected)
+      if (locale !== '') {
+        try {
+          options[key] = Intl.getCanonicalLocales(locale)[0]
+        } catch (_err) {
+          throw new Error(expected)
+        }
+      }
     }
 
     const constructor = defaults[key].constructor

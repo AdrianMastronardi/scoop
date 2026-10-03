@@ -263,6 +263,13 @@ program.addOption(
     .default(String(defaults.userAgentSuffix))
 )
 
+program.addOption(
+  new Option(
+    '--locale <string>',
+    'Language tag for browser formatting and content requests, such as es-ES; empty keeps defaults.')
+    .default(defaults.locale)
+)
+
 //
 // Networking
 //
@@ -439,6 +446,7 @@ program.action(async (name, options, command) => {
 
   // Convert 'true' / 'false' strings to booleans.
   for (const [key, value] of Object.entries(options)) {
+    if (key === 'locale') continue
     if (value === 'true') {
       options[key] = true
     }

@@ -35,6 +35,7 @@
  * @property {boolean} headless=true - Should Playwright run in headless mode?
  * @property {boolean} chromiumSandbox=true - Enable Chromium's internal sandbox. Operator setting; requires a compatible host or worker image. Launch failure does not retry without the sandbox.
  * @property {string} userAgentSuffix="" - String to append to the user agent.
+ * @property {string} locale="" - Primitive string containing one Intl language tag, canonicalized (e.g. "es-es" to "es-ES"). Empty or undefined keeps defaults. Non-strings, malformed tags, lists, weights and whitespace fail before setup. Configures browser language/formatting and Accept-Language on browser, metadata HEAD, content curl and yt-dlp requests; excludes infrastructure operations. Does not change time zone or process environment. Structurally valid tags may lack browser formatting data; browser setup rejection returns FAILED. Summaries and successfully generated provenance record the canonical request, not the effective locale or served language.
  *
  * @property {string[]} blocklist - A list of patterns to be matched against each request's URL and IP address and subsequently blocked during capture. Valid entries include url strings, CIDR strings, and regular expressions in string form.
  * @property {string} intercepter="ScoopProxy" - Network interception method to be used. Available at the moment: "ScoopProxy".

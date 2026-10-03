@@ -492,7 +492,8 @@ export class Scoop {
       this.log.info(`🍨 Starting capture of ${this.url}.`)
       this.state = Scoop.states.CAPTURE
     } catch (err) {
-      this.log.error(`An error occurred during capture setup (${formatErrorMessage(err)}).`)
+      const configuration = options.locale ? ` [locale=${JSON.stringify(options.locale)}]` : ''
+      this.log.error(`An error occurred during capture setup${configuration} (${formatErrorMessage(err)}).`)
       this.log.trace(err)
       this.state = Scoop.states.FAILED
       await this.teardown()
@@ -662,6 +663,7 @@ export class Scoop {
     const context = await this.#browser.newContext({
       ...this.intercepter.contextOptions,
       userAgent,
+      ...(options.locale ? { locale: options.locale } : {}),
       // NOTE:
       // This is a temporary workaround.
       // Most browsers now accept zstd, but part of the web archiving stack (indexing, playback ...) is not fully ready to handle it yet.
@@ -757,7 +759,7 @@ export class Scoop {
 
       let headRequest
       try {
-        headRequest = await fetchHead(this.url, policy, { signal: controller.signal })
+        headRequest = await fetchHead(this.url, policy, { signal: controller.signal, locale: this.options.locale })
       } finally {
         clearTimeout(timeoutId)
         policy.close()
@@ -833,6 +835,7 @@ export class Scoop {
         '--disable', '--globoff', '--proto', '=http,https', '--proto-redir', '=http,https',
         '--noproxy', '', '--url', this.url,
         '--header', `User-Agent: ${userAgent}`,
+        ...(this.options.locale ? ['--header', `Accept-Language: ${this.options.locale}`] : []),
         '--output', '/dev/null',
         '--proxy', `http://${this.options.proxyHost}:${this.options.proxyPort}`,
         '--insecure', // TBD: SSL checks are delegated to the proxy
@@ -913,6 +916,7 @@ export class Scoop {
           '--disable', '--globoff', '--proto', '=http,https', '--proto-redir', '=http,https',
           '--noproxy', '', '--url', this.pageInfo.faviconUrl,
           '--header', `User-Agent: ${userAgent}`,
+          ...(this.options.locale ? ['--header', `Accept-Language: ${this.options.locale}`] : []),
           '--output', '/dev/null',
           '--proxy', `http://${this.options.proxyHost}:${this.options.proxyPort}`,
           '--insecure', // TBD: SSL checks are delegated to the proxy
@@ -1000,6 +1004,7 @@ export class Scoop {
         '--no-check-certificate',
         '--proxy', `http://${this.options.proxyHost}:${this.options.proxyPort}`,
         '--max-filesize', String(this.options.maxVideoCaptureSize),
+        ...(this.options.locale ? ['--add-headers', `Accept-Language:${this.options.locale}`] : []),
         '--', this.url
       ]
 

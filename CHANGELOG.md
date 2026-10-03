@@ -11,6 +11,7 @@
 
 ### Additions
 
+- `locale` (`--locale`) selects browser language and regional formatting per capture and propagates its canonical language tag to metadata HEAD, content `curl` and `yt-dlp` requests. Input is validated before setup; the default, `''`, keeps existing client defaults. Summaries and successfully generated provenance, including WACZ metadata, record the requested canonical tag, not the effective locale or served language.
 - `screenshotMaxWidth` and `screenshotMaxHeight` (`--screenshot-max-width`, `--screenshot-max-height`) clip the full-page screenshot to the top left of the page. The default, `0`, leaves it unbounded. Unbounded, a very tall page can take the browser several gigabytes to render; clipped at 16,000 pixels high, pages that had exhausted a 5 GiB memory limit peaked at about 1.4 GB.
 - The capture summary has a `steps` list: each step's name, start time, duration, and outcome (`completed`, `failed`, `limit`, `interrupted`, or `skipped`).
 

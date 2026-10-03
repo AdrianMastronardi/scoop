@@ -212,6 +212,7 @@ Options:
   --headless <bool>                                      Should Chrome run in headless mode? (choices: "true", "false", default: "true")
   --chromium-sandbox <bool>                              Enable Chromium sandboxing (requires a compatible host or worker image). (choices: "true", "false", default: "true")
   --user-agent-suffix <string>                           If provided, will be appended to Chrome's user agent. (default: "")
+  --locale <string>                                      Language tag for browser formatting and content requests, such as es-ES; empty keeps defaults. (default: "")
   --blocklist <string>                                   If set, replaces Scoop's default list of url patterns and IP ranges Scoop should not capture. Comma-separated. Example: "/https?://localhost/,0.0.0.0/8,10.0.0.0".
   --intercepter <string>                                 ScoopIntercepter class to be used to intercept network exchanges. (default: "ScoopProxy")
   --proxy-host <string>                                  Hostname to be used by Scoop's HTTP proxy. (default: "localhost")
@@ -283,6 +284,65 @@ try {
   // ...
 }
 ```
+
+### Capture locale and request language
+
+Use `locale` to choose the browser's language and regional formatting and send
+that language preference on Scoop's content requests:
+
+```javascript
+const capture = await Scoop.capture('https://lil.law.harvard.edu', {
+  locale: 'es-es'
+})
+if (capture.state === Scoop.states.FAILED) {
+  throw new Error('Capture failed; inspect the setup logs')
+}
+console.log((await capture.summary()).options.locale) // es-ES
+```
+
+```bash
+scoop "https://lil.law.harvard.edu" --locale es-ES
+scoop "https://lil.law.harvard.edu" --locale en-GB
+scoop "https://lil.law.harvard.edu" --locale ""
+```
+
+A non-empty value must be a primitive string containing one language tag accepted
+by `Intl.getCanonicalLocales()`. Scoop canonicalizes it (`es-es` becomes `es-ES`)
+and rejects non-strings, malformed tags such as `not_a_locale`, language lists,
+quality weights, control characters and surrounding whitespace before browser or
+proxy startup. `new Scoop()` throws, `Scoop.capture()` rejects and the CLI reports
+the error and exits 1. CLI values remain strings: `--locale false` is structurally
+valid, while API input `{ locale: false }` is rejected as a boolean.
+
+Structural validity does not guarantee available formatting data: `zz-ZZ`, for
+example, is accepted. Node and Chromium may have different ICU data. If Chromium
+rejects a validated locale during setup, Scoop logs the active locale and original
+error, releases resources and returns a `FAILED` capture without retrying. Logs
+respect `logLevel`; callers must check the state. The CLI exits 1 and still writes
+a failed summary when `--json-summary-output` is requested.
+
+The canonical preference applies to browser navigation and resources through
+Playwright's context locale, to the initial metadata HEAD and its redirects, to
+non-HTML and headless favicon downloads through `curl`, and to `yt-dlp` metadata,
+media and subtitle requests. It is retained across redirects followed by those
+clients and requests to other content origins. Subtitle selection remains
+`--sub-langs all`. Existing proxy routing, destination checks and timeouts apply.
+This sets the browser's default preference; it does not replace explicit headers
+chosen by page JavaScript. Servers can ignore it, and cookies, URLs and user agents
+can still produce different responses across clients.
+
+An absent, `undefined` or empty locale means no override: existing client defaults
+remain, including `Accept-Language: *` on HEAD. Public-IP lookup, certificate
+collection, executable health checks and archive signing receive no language
+override. The option does not change process environment, Node formatting, browser
+time zone, system clock or capture timestamps.
+
+`summary().options.locale` always records the canonical requested tag or `''`.
+Successful provenance generation also includes it in `provenanceInfo.options.locale`
+and the WACZ's `datapackage.json` provenance metadata. With `provenanceSummary: false`,
+the summary's `provenanceInfo` is empty; failed setup does not imply provenance was
+generated. These fields do not measure the effective inherited/formatting locale
+or the language served, and do not configure a WACZ replay viewer.
 
 ### Example: Working with a copy of default settings
 ```javascript

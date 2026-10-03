@@ -127,8 +127,11 @@ export class NetworkPolicy {
   }
 }
 
-/** The unrecorded metadata HEAD, with destination checks on every redirect. */
-export async function fetchHead (input, policy, { signal } = {}) {
+/**
+ * The unrecorded metadata HEAD, with destination checks on every redirect.
+ * The optional locale is a validated, canonical capture locale; empty keeps fetch defaults.
+ */
+export async function fetchHead (input, policy, { signal, locale = '' } = {}) {
   let url = input
   for (let redirects = 0; ; redirects++) {
     const destination = await policy.resolve(url, { signal })
@@ -149,7 +152,7 @@ export async function fetchHead (input, policy, { signal } = {}) {
           host: destination.url.host,
           connection: 'close',
           accept: '*/*',
-          'accept-language': '*',
+          'accept-language': locale || '*',
           'sec-fetch-mode': 'cors',
           'user-agent': headUserAgent,
           'accept-encoding': destination.url.protocol === 'https:' ? 'br, gzip, deflate' : 'gzip, deflate'

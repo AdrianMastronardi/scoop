@@ -57,3 +57,18 @@ test('Chromium sandboxing defaults to enabled and accepts an explicit operator c
   assert.equal(filterOptions({ chromiumSandbox: true }).chromiumSandbox, true)
   assert.equal(filterOptions({ chromiumSandbox: false }).chromiumSandbox, false)
 })
+
+test('locale accepts and canonicalizes one primitive language tag, or keeps defaults', () => {
+  const paths = { ytDlpPath: process.execPath, cripPath: process.execPath }
+  assert.equal(filterOptions(paths).locale, '')
+  for (const [locale, expected] of [[undefined, ''], ['', ''], ['es', 'es'], ['es-es', 'es-ES'], ['en-gb', 'en-GB'], ['zz-ZZ', 'zz-ZZ'], ['false', 'false']]) {
+    assert.equal(filterOptions({ ...paths, locale }).locale, expected)
+  }
+})
+
+test('locale rejects coercible non-strings, malformed tags and header syntax before casting', () => {
+  const paths = { ytDlpPath: process.execPath, cripPath: process.execPath }
+  for (const locale of [null, true, false, 0, 1, [], ['es-ES'], {}, new String('es'), () => 'es', ' ', '\t', ' es', 'es ', 'not_a_locale', 'es,en', 'es;q=0.8', 'es\r\nX: y', 'es\n', 'es\0']) { // eslint-disable-line no-new-wrappers
+    assert.throws(() => filterOptions({ ...paths, locale }), /locale.*primitive string.*single language tag/)
+  }
+})

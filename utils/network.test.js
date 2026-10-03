@@ -193,3 +193,53 @@ test('HEAD reads response headers larger than Node\'s default limit', async t =>
   const result = await fetchHead(url, new NetworkPolicy([]))
   assert.equal(result.headers.get('content-type'), 'application/pdf')
 })
+
+test('HEAD propagates locale across origins, retains baseline headers and derives Host per destination', async t => {
+  const requests = []
+  const final = await origin(t, (req, res) => {
+    requests.push({ method: req.method, headers: req.headers })
+    res.end()
+  })
+  const start = await origin(t, (req, res) => {
+    requests.push({ method: req.method, headers: req.headers })
+    res.writeHead(302, { location: final.url })
+    res.end()
+  })
+  for (const locale of [undefined, '', 'es-ES']) {
+    requests.length = 0
+    const policy = new NetworkPolicy([])
+    try {
+      const result = await fetchHead(start.url, policy, { locale })
+      assert.equal(result.url, final.url + '/')
+      assert.equal(requests.length, 2)
+      for (const request of requests) {
+        assert.equal(request.method, 'HEAD')
+        assert.equal(request.headers['accept-language'], locale || '*')
+      }
+      assert.equal(requests[0].headers.host, new URL(start.url).host)
+      assert.equal(requests[1].headers.host, new URL(final.url).host)
+    } finally {
+      policy.close()
+    }
+  }
+})
+
+test('HEAD locale does not bypass redirect destination checks or the redirect limit', async t => {
+  const requests = []
+  const { url } = await origin(t, (req, res) => {
+    requests.push(req)
+    res.writeHead(302, { location: '/blocked' })
+    res.end()
+  })
+  const denied = new NetworkPolicy(['/\\/blocked$/'])
+  t.after(() => denied.close())
+  await assert.rejects(fetchHead(url, denied, { locale: 'es-ES' }), { code: 'ERR_NETWORK_POLICY' })
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].headers['accept-language'], 'es-ES')
+  requests.length = 0
+  const allowed = new NetworkPolicy([])
+  t.after(() => allowed.close())
+  await assert.rejects(fetchHead(url, allowed, { locale: 'es-ES' }), /Too many redirects/)
+  assert.equal(requests.length, 21)
+  assert(requests.every(request => request.headers['accept-language'] === 'es-ES'))
+})
