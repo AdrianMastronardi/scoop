@@ -38,6 +38,7 @@ export const defaults = {
   headless: true,
   chromiumSandbox: true,
   userAgentSuffix: '',
+  timezoneId: '',
 
   blocklist: [
     '/https?:\/\/localhost/', // eslint-disable-line
@@ -113,6 +114,22 @@ export function filterOptions (newOptions = {}) {
       options[key] = key in newOptions ? newOptions[key] : defaults[key]
     } catch (_err) { // `key in newOptions` may throw if `newOptions` is not object-like
       options[key] = defaults[key]
+    }
+
+    // Unlike existing options, timezoneId must be a primitive string before casting.
+    if (key === 'timezoneId') {
+      if (options[key] === undefined) options[key] = defaults[key]
+      const timezoneId = options[key]
+      const expected = '"timezoneId" must be a primitive string naming a time zone accepted by Intl (for example "Europe/Madrid" or "UTC"), or "" for no override; numeric offsets are not supported.'
+      if (typeof timezoneId !== 'string') throw new Error(expected)
+      if (timezoneId !== '') {
+        if (/^[+-]/.test(timezoneId) || timezoneId.trim() !== timezoneId) throw new Error(expected)
+        try {
+          new Intl.DateTimeFormat('en', { timeZone: timezoneId }) // eslint-disable-line no-new
+        } catch (_err) {
+          throw new Error(expected)
+        }
+      }
     }
 
     const constructor = defaults[key].constructor

@@ -35,6 +35,7 @@
  * @property {boolean} headless=true - Should Playwright run in headless mode?
  * @property {boolean} chromiumSandbox=true - Enable Chromium's internal sandbox. Operator setting; requires a compatible host or worker image. Launch failure does not retry without the sandbox.
  * @property {string} userAgentSuffix="" - String to append to the user agent.
+ * @property {string} timezoneId="" - Browser-only time zone override. Must be a primitive string naming a zone accepted by Node's Intl (IANA zones and aliases, e.g. "Europe/Madrid", "UTC", "US/Eastern"). Empty or undefined means no override; numeric offsets, whitespace and non-strings are rejected before setup. Does not change instants, capture timestamps, process environment, locale or external tools. Chromium rejection returns a FAILED capture. Summaries and successfully generated provenance record the requested identifier unchanged, not the effective browser zone.
  *
  * @property {string[]} blocklist - A list of patterns to be matched against each request's URL and IP address and subsequently blocked during capture. Valid entries include url strings, CIDR strings, and regular expressions in string form.
  * @property {string} intercepter="ScoopProxy" - Network interception method to be used. Available at the moment: "ScoopProxy".

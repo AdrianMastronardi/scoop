@@ -11,6 +11,7 @@
 
 ### Additions
 
+- `timezoneId` (`--timezone-id`) selects a browser time zone per capture, including seasonal offsets. It validates named zones before setup and preserves the supplied identifier in capture summaries and successfully generated provenance, including WACZ metadata. The default, `''`, inherits the system zone; it does not record the effective zone. Chromium rejection returns a failed capture with setup diagnostics and cleanup.
 - `screenshotMaxWidth` and `screenshotMaxHeight` (`--screenshot-max-width`, `--screenshot-max-height`) clip the full-page screenshot to the top left of the page. The default, `0`, leaves it unbounded. Unbounded, a very tall page can take the browser several gigabytes to render; clipped at 16,000 pixels high, pages that had exhausted a 5 GiB memory limit peaked at about 1.4 GB.
 - The capture summary has a `steps` list: each step's name, start time, duration, and outcome (`completed`, `failed`, `limit`, `interrupted`, or `skipped`).
 

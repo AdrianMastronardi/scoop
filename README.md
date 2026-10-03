@@ -212,6 +212,7 @@ Options:
   --headless <bool>                                      Should Chrome run in headless mode? (choices: "true", "false", default: "true")
   --chromium-sandbox <bool>                              Enable Chromium sandboxing (requires a compatible host or worker image). (choices: "true", "false", default: "true")
   --user-agent-suffix <string>                           If provided, will be appended to Chrome's user agent. (default: "")
+  --timezone-id <string>                                 Browser time zone: a named zone such as Europe/Madrid or UTC; empty inherits the system zone. (default: "")
   --blocklist <string>                                   If set, replaces Scoop's default list of url patterns and IP ranges Scoop should not capture. Comma-separated. Example: "/https?://localhost/,0.0.0.0/8,10.0.0.0".
   --intercepter <string>                                 ScoopIntercepter class to be used to intercept network exchanges. (default: "ScoopProxy")
   --proxy-host <string>                                  Hostname to be used by Scoop's HTTP proxy. (default: "localhost")
@@ -283,6 +284,34 @@ try {
   // ...
 }
 ```
+
+### Browser time zone
+
+Set `timezoneId` to select the browser's time zone independently for each capture:
+
+```javascript
+const capture = await Scoop.capture('https://lil.law.harvard.edu', {
+  timezoneId: 'Europe/Madrid'
+})
+if (capture.state === Scoop.states.FAILED) {
+  throw new Error('Capture failed; inspect the setup logs')
+}
+console.log((await capture.summary()).options.timezoneId) // Europe/Madrid
+```
+
+```bash
+scoop "https://lil.law.harvard.edu" --timezone-id Europe/Madrid
+scoop "https://lil.law.harvard.edu" --timezone-id UTC
+scoop "https://lil.law.harvard.edu" --timezone-id ""
+```
+
+The default is `''` (no override); an absent or `undefined` value also inherits the system time zone. Other values must be primitive strings naming zones accepted by Node's ICU, such as `Europe/Madrid`, `UTC`, `US/Eastern`, `Etc/GMT+5` or `Asia/Kathmandu`. Numeric offsets (`+01:00`, `-05:00`), whitespace-only strings, surrounding whitespace and non-string values are rejected before browser or proxy startup. `new Scoop()` throws, `Scoop.capture()` rejects, and the CLI reports the validation error and exits 1.
+
+Node and Chromium can have different time zone data. If Chromium rejects a validated zone during setup, Scoop logs the active `timezoneId` and original browser error, cleans up resources and returns a capture in state `FAILED`, without retrying. Logs respect `logLevel`; callers must check the capture state. The CLI exits 1 and still writes a failed summary when `--json-summary-output` is requested.
+
+This option changes browser local date parts and seasonal offsets only. It does not change instants, the system clock, capture timestamps, Node formatting, process environment, locale, language, geolocation or requests made by `curl`, `crip` and `yt-dlp`. It has no corresponding HTTP header and needs no locale override.
+
+`summary().options.timezoneId` always records the requested identifier, including aliases, or `''`. Successfully generated provenance also records it in `provenanceInfo.options.timezoneId` and exported WACZ provenance metadata. With `provenanceSummary: false`, the summary's `provenanceInfo` stays empty. Setup failure does not imply provenance was generated. These values record requested configuration: `''` does not identify the inherited zone, and aliases may differ from Chromium's resolved name.
 
 ### Example: Working with a copy of default settings
 ```javascript

@@ -263,6 +263,13 @@ program.addOption(
     .default(String(defaults.userAgentSuffix))
 )
 
+program.addOption(
+  new Option(
+    '--timezone-id <string>',
+    'Browser time zone: a named zone such as Europe/Madrid or UTC; empty inherits the system zone.')
+    .default(defaults.timezoneId)
+)
+
 //
 // Networking
 //
@@ -439,6 +446,7 @@ program.action(async (name, options, command) => {
 
   // Convert 'true' / 'false' strings to booleans.
   for (const [key, value] of Object.entries(options)) {
+    if (key === 'timezoneId') continue
     if (value === 'true') {
       options[key] = true
     }

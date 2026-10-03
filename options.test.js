@@ -57,3 +57,18 @@ test('Chromium sandboxing defaults to enabled and accepts an explicit operator c
   assert.equal(filterOptions({ chromiumSandbox: true }).chromiumSandbox, true)
   assert.equal(filterOptions({ chromiumSandbox: false }).chromiumSandbox, false)
 })
+
+test('timezoneId defaults and accepted named zones retain the supplied identifier', () => {
+  const paths = { ytDlpPath: process.execPath, cripPath: process.execPath }
+  assert.equal(filterOptions(paths).timezoneId, '')
+  for (const timezoneId of [undefined, '', 'Europe/Madrid', 'UTC', 'US/Eastern', 'Etc/GMT+5', 'Asia/Kathmandu']) {
+    assert.equal(filterOptions({ ...paths, timezoneId }).timezoneId, timezoneId ?? '')
+  }
+})
+
+test('timezoneId rejects non-string, whitespace, unknown and numeric-offset inputs before coercion', () => {
+  const paths = { ytDlpPath: process.execPath, cripPath: process.execPath }
+  for (const timezoneId of [null, true, false, 0, 12, [], ['Europe/Madrid'], {}, new String('UTC'), () => 'UTC', ' ', '\t', ' UTC', 'UTC ', 'Mars/Olympus', '+01:00', '-05:00', 'true', 'false']) { // eslint-disable-line no-new-wrappers
+    assert.throws(() => filterOptions({ ...paths, timezoneId }), /timezoneId.*primitive string.*time zone/)
+  }
+})

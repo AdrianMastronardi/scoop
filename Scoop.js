@@ -492,7 +492,8 @@ export class Scoop {
       this.log.info(`🍨 Starting capture of ${this.url}.`)
       this.state = Scoop.states.CAPTURE
     } catch (err) {
-      this.log.error(`An error occurred during capture setup (${formatErrorMessage(err)}).`)
+      const configuration = options.timezoneId ? ` [timezoneId=${JSON.stringify(options.timezoneId)}]` : ''
+      this.log.error(`An error occurred during capture setup${configuration} (${formatErrorMessage(err)}).`)
       this.log.trace(err)
       this.state = Scoop.states.FAILED
       await this.teardown()
@@ -662,6 +663,7 @@ export class Scoop {
     const context = await this.#browser.newContext({
       ...this.intercepter.contextOptions,
       userAgent,
+      ...(options.timezoneId ? { timezoneId: options.timezoneId } : {}),
       // NOTE:
       // This is a temporary workaround.
       // Most browsers now accept zstd, but part of the web archiving stack (indexing, playback ...) is not fully ready to handle it yet.
