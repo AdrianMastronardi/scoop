@@ -119,6 +119,7 @@ export async function scoopToWACZ (capture, includeRaw = false, signingServer) {
       datapackageExtras: {
         ...(inventory ? { multipage: inventory } : {}),
         state: capture.state,
+        captureErrors: capture.errors,
         states: Object.keys(Scoop.states),
         provenanceInfo: capture.options.provenanceSummary ? capture.provenanceInfo : null
       }
@@ -189,7 +190,7 @@ export async function scoopToWACZ (capture, includeRaw = false, signingServer) {
       for (const exchange of capture.exchanges) {
         for (const type of ['request', 'response']) {
           const data = exchange[`${type}Raw`]
-          if (!data) {
+          if (!data?.length) {
             continue
           }
 

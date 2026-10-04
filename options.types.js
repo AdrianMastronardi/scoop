@@ -49,10 +49,23 @@
  */
 
 /**
- * Descriptive version-1 page inventory. Public getters return independent copies.
+ * A rejected upstream certificate; snapshots are descriptive and never change trust.
+ * @typedef {Object} ScoopCaptureError
+ * @property {'tls_validation_failed'} kind
+ * @property {string} code - Original Node certificate verification code.
+ * @property {string} message - Original certificate diagnostic.
+ * @property {'head'|'proxy'} phase
+ * @property {?string} url - Credential-free destination; null when only CONNECT authority is known.
+ * @property {string} hostname
+ * @property {number} port - Effective destination port.
+ * @property {?string} pageId - Owning array attempt; null for string captures or unowned requests.
+ */
+
+/**
+ * Descriptive page inventory; new captures use version 2, version 1 remains readable. Public getters return independent copies.
  * Page work ends before global certificate/provenance steps and export/signing.
  * @typedef {Object} ScoopMultipage
- * @property {1} version
+ * @property {1|2} version
  * @property {?string} startedAt - UTC capture start; null before setup.
  * @property {?string} finishedAt - UTC end of page work; null while active.
  * @property {string[]} urls - Validated, ordered requested URLs.

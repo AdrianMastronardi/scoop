@@ -2,6 +2,7 @@ import dns from 'node:dns/promises'
 import http from 'node:http'
 import https from 'node:https'
 import net from 'node:net'
+import { withTlsDestination } from './tls-errors.js'
 import { Address6 } from '@laverdet/beaugunderson-ip-address'
 import { castBlocklistMatcher, searchBlocklistFor } from './blocklist.js'
 import { MAX_HTTP_HEADER_SIZE } from '../constants.js'
@@ -139,6 +140,7 @@ export async function fetchHead (input, policy, { signal } = {}) {
     const response = await new Promise((resolve, reject) => {
       const request = (destination.url.protocol === 'https:' ? https : http).request(destination.url, {
         method: 'HEAD',
+        rejectUnauthorized: true,
         agent: false,
         maxHeaderSize: MAX_HTTP_HEADER_SIZE,
         lookup: destination.lookup,
@@ -164,7 +166,7 @@ export async function fetchHead (input, policy, { signal } = {}) {
       request.on('socket', socket => socket.once('connect', () => {
         try { policy.verifyPeer(socket, destination) } catch (error) { request.destroy(error) }
       }))
-      request.on('error', reject)
+      request.on('error', error => reject(withTlsDestination(error, destination.url)))
       request.end()
     })
     const location = response.headers.location

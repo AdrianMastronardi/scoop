@@ -47,6 +47,7 @@ export class ScoopProxy extends ScoopIntercepter {
         maxHeaderSize: MAX_HTTP_HEADER_SIZE,
         authorizeRequest: (request, signal) => {
           const target = requestUrl(request)
+          this.capture.trackTlsRequest(request, target)
           return this.networkPolicy.resolve(target, { signal })
         },
         verifyPeer: (socket, destination) => this.networkPolicy.verifyPeer(socket, destination),
@@ -54,7 +55,7 @@ export class ScoopProxy extends ScoopIntercepter {
         responseTransformer: this.responseTransformer.bind(this),
         serverOptions: () => {
           return {
-            rejectUnauthorized: false,
+            rejectUnauthorized: true,
             // This flag allows legacy insecure renegotiation between OpenSSL and unpatched servers
             // @see {@link https://stackoverflow.com/questions/74324019/allow-legacy-renegotiation-for-nodejs}
             secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT
@@ -173,6 +174,11 @@ export class ScoopProxy extends ScoopIntercepter {
    * @returns {void}
    */
   onError (err, _serverRequest, clientRequest) {
+    if (this.capture.recordProxyTlsError(err, clientRequest)) {
+      clientRequest?.socket?.destroy()
+      return
+    }
+
     // Quietly suppress socket disconnection errors
     // when we have no way to send notice back to the client
     if (!clientRequest || clientRequest.socket.destroyed) return

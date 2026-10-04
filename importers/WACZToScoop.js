@@ -37,7 +37,7 @@ export async function WACZToScoop (zipPath) {
     const datapackage = await getDataPackage(zip)
     const inventory = datapackage?.extras?.multipage
     const hasInventory = Object.hasOwn(datapackage.extras || {}, 'multipage')
-    if (hasInventory && (!inventory || inventory.version !== 1 || !Array.isArray(inventory.urls) || !inventory.urls.length)) throw new Error('Unsupported or invalid multipage archive')
+    if (hasInventory && (!inventory || ![1, 2].includes(inventory.version) || !Array.isArray(inventory.urls) || !inventory.urls.length)) throw new Error('Unsupported or invalid multipage archive')
     // Archived options remain descriptive data, never runtime instructions.
     const capture = Scoop.fromArchive(hasInventory ? inventory.urls[0] : datapackage.mainPageUrl)
     Object.assign(capture, {
@@ -51,6 +51,7 @@ export async function WACZToScoop (zipPath) {
       capture.pageInfo = structuredClone(inventory.pages[0].pageInfo)
       capture.steps = inventory.pages.flatMap(page => page.steps).sort((a, b) => Number(a.id.slice(5)) - Number(b.id.slice(5)))
     }
+    capture.restoreCaptureErrors(Object.hasOwn(datapackage.extras || {}, 'captureErrors') ? datapackage.extras.captureErrors : [])
     if (datapackage?.extras?.provenanceInfo) capture.provenanceInfo = datapackage.extras.provenanceInfo
     return capture
   } finally {

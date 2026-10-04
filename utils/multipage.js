@@ -29,7 +29,7 @@ export function validateUrls (urls) {
 
 export function initializeMultipage (capture, urls) {
   const data = {
-    version: 1,
+    version: 2,
     startedAt: null,
     finishedAt: null,
     urls: [...urls],
@@ -102,7 +102,8 @@ export function validateInventory (data, exchanges, trace) {
     if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 19) !== value.slice(0, 19)) fail('invalid date')
     return ms
   }
-  if (!object(data) || data.version !== 1) fail('unsupported version')
+  if (!object(data) || ![1, 2].includes(data.version)) fail('unsupported version')
+  const allowedReason = reason => reasons.has(reason) || (data.version === 2 && reason === 'tls_validation_failed')
   const urls = validateUrls(data.urls)
   if (!Array.isArray(data.pages) || data.pages.length !== urls.length) fail('URL/page count')
   const start = date(data.startedAt)
@@ -117,7 +118,7 @@ export function validateInventory (data, exchanges, trace) {
     if (['completed', 'failed'].includes(step.outcome)) {
       if (step.reason !== null) fail('step reason')
     } else if (step.outcome === 'skipped') {
-      if (!(reasons.has(step.reason) || step.reason === 'not_applicable')) fail('step reason')
+      if (!(allowedReason(step.reason) || step.reason === 'not_applicable')) fail('step reason')
     } else if (!['capture_timeout', 'capture_size_limit', 'snapshot_timeout', 'non_web_capture'].includes(step.reason)) fail('step limit reason')
     return timestamp
   }
@@ -133,7 +134,7 @@ export function validateInventory (data, exchanges, trace) {
     if (!object(page) || pageFields.some(field => !Object.hasOwn(page, field))) fail('missing page fields')
     if (page.id !== pageId(index) || page.requestedUrl !== urls[index] || data.urls[index] !== urls[index]) fail('page identity/order')
     if (!['complete', 'partial', 'failed', 'skipped'].includes(page.outcome)) fail('nonterminal outcome')
-    if (page.outcome === 'complete' ? page.reason !== null : !reasons.has(page.reason)) fail('page reason')
+    if (page.outcome === 'complete' ? page.reason !== null : !allowedReason(page.reason)) fail('page reason')
     if (!object(page.pageInfo) || 'favicon' in page.pageInfo || !object(page.attachments) || !Array.isArray(page.steps)) fail('page information/attachments/steps')
     if (page.resolvedUrl !== null) {
       try { if (!['http:', 'https:'].includes(new URL(page.resolvedUrl).protocol)) fail('response URL') } catch { fail('response URL') }

@@ -1,0 +1,8 @@
+# Allow only the committed test certificates and their test-only leaf key.
+!/ca.pem
+!/expired.pem
+!/future.pem
+!/key.pem
+!/untrusted.pem
+!/valid.pem
+!/wrong.pem

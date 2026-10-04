@@ -290,6 +290,12 @@ A string keeps the existing single-page behavior. An array of **one URL** explic
 - Adds `id`, `pageId` and `reason` to step records and includes versioned `multipage` metadata in summaries and WACZ `datapackage.json` extras.
 - Fails export if a retained record cannot be serialized. String mode retains its logged omission behavior unless payload deduplication is enabled.
 
+Upstream HTTPS certificates are always verified, including HEAD probes, redirects and downloads through the proxy. A certificate failure on the target ends that attempt as failed; a rejected secondary resource leaves an otherwise complete attempt partial while retaining valid content and snapshots. In array mode, later targets can still run within the shared budget. This also applies to a URL string.
+
+Inspect `capture.errors` or `(await capture.summary()).errors` for independent snapshots of the original certificate code/message, validation phase, destination and owning page. The array is present even with logging and provenance disabled. A CONNECT failure can expose only hostname/port, with `url: null`; unowned errors have `pageId: null`. WACZ stores these diagnostics in `datapackage.json` under `extras.captureErrors`; reconstruction validates them without changing TLS policy. Older archives without the field restore `[]`. A failed capture cannot be exported; the CLI writes its requested JSON summary and exits 1. A partial capture remains exportable and a successful CLI export exits 0.
+
+New array captures use inventory version 2, adding the `tls_validation_failed` reason. Version 1 archives remain readable with their original reason vocabulary.
+
 The page inventory is finalized before global certificate/provenance work. Its end timestamp describes page work, not signing/export or the end of the global step trace. It is retained even when `provenanceSummary` is false. `Scoop.fromWACZ()` restores validated inventory and artifact associations from raw-enabled archives without applying archived options or making network requests. Raw-free WACZs support replay, not reconstruction. Reconstructed captures can export WARC; WACZ re-export remains unsupported.
 
 ### Optional payload deduplication

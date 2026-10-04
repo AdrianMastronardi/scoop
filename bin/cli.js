@@ -30,7 +30,9 @@ program
 //
 program.arguments('<urls...>')
 program.addOption(new Option('--deduplicate-payloads', 'Deduplicate identical eligible WARC payloads (default: false); does not reduce received bytes or raw storage.'))
-program.addHelpText('after', '\nMultiple URLs share one browser session and one time/size budget. The default 60-second budget is sized for one page; allow roughly 60 seconds per page, more for slow pages or video. Inspect the JSON summary for per-page results; exit 0 means an archive was written, not full coverage.\n')
+program.addHelpText('after', '\nMultiple URLs share one browser session and one time/size budget. The default 60-second budget is sized for one page; allow roughly 60 seconds per page, more for slow pages or video. Inspect the JSON summary for per-page results and upstream TLS errors; exit 0 means an archive was written, not full coverage.\n')
+
+program.addHelpText('after', '\nUpstream HTTPS certificates are always verified. Invalid target certificates fail the attempt; invalid secondary resources can produce a partial archive.\n')
 
 program.addOption(
   new Option('-o, --output <string>', 'Output path.')

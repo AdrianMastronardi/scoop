@@ -4,6 +4,8 @@
 
 ### Compatibility notes
 
+- **Upstream TLS certificates are verified.** Invalid target certificates now fail the attempt without HEAD-to-GET fallback; invalid secondary resources leave valid content exportable as partial. String and array captures expose independent `errors` snapshots, also stored as WACZ `extras.captureErrors`. New multipage inventories use version 2 with `tls_validation_failed`; version 1 and archives without diagnostics remain readable.
+
 - **Array captures are opt-in.** A URL string and one CLI URL retain single-page behavior. Arrays (including one-element arrays) use strict URL validation, shared session/time/size budgets, blocked service workers, primary-page cache bypass, per-page artifact names and strict archive serialization. CLI exit 0 can represent partial coverage; inspect the page inventory.
 
 - **Summaries of failed captures.** `--json-summary-output` is now written for failed captures too, with `state` set to FAILED, and the CLI still exits 1. Callers that treated the file's existence as success should check `state`.

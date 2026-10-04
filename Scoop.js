@@ -4,6 +4,7 @@ import os from 'os'
 import { performance } from 'node:perf_hooks'
 import { initializeMultipage, multipageState, multipageSnapshot, validateUrls, validateInventory, artifactSummary } from './utils/multipage.js'
 import { observeNavigation, associateTarget } from './utils/page-navigation.js'
+import { CaptureTlsErrors } from './utils/tls-errors.js'
 import { readFile, readdir, mkdir, access } from 'fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { createHash } from 'crypto'
@@ -84,6 +85,8 @@ export class Scoop {
   #stepNumber = 0
   #sessionFailed = false
   #closingPages = new Set()
+  #tls = new CaptureTlsErrors()
+  #unobserveTls
 
   /**
    * Independent snapshot of the page inventory; absent for string captures.
@@ -91,17 +94,42 @@ export class Scoop {
    */
   get multipage () { return multipageSnapshot(this) }
 
+  /** Independent structured TLS diagnostics, including failed captures.
+   * @type {ScoopCaptureError[]}
+   */
+  get errors () { return this.#tls.errors }
+
+  /** Internal proxy hook: bind ownership before asynchronous authorization. @ignore */
+  trackTlsRequest (request, target) { this.#tls.admit(request, target) }
+
+  /** Internal proxy hook: retain verification failures before downstream closure. @ignore */
+  recordProxyTlsError (error, request) { return this.#tls.proxyError(error, request) }
+
+  /** Restore descriptive archive diagnostics, never executable policy. @ignore */
+  restoreCaptureErrors (errors) { this.#tls.restore(errors, this.multipage) }
+
+  #finishTlsRun (run) {
+    if (this.#tls.failed(run)) {
+      run.state = Scoop.states.FAILED
+      if (run !== this) run.reason = 'tls_validation_failed'
+    } else if (this.#tls.partial(run) && [Scoop.states.CAPTURE, Scoop.states.COMPLETE].includes(run.state)) {
+      run.state = Scoop.states.PARTIAL
+      if (run !== this) run.reason = 'tls_validation_failed'
+    }
+    this.#tls.end(run)
+  }
+
   /** Called by the intercepter when the shared received-byte budget expires. */
   stopRecording (reason) {
     if (!multipageState(this)) {
-      this.state = Scoop.states.PARTIAL
+      if (!this.#tls.failed(this)) this.state = Scoop.states.PARTIAL
       this.intercepter.recordExchanges = false
       return true
     }
     if (this.#recordingStop) return false
     this.#recordingStop = reason
     this.intercepter.recordExchanges = false
-    if (this.#activeRun) {
+    if (this.#activeRun && !this.#tls.failed(this.#activeRun)) {
       this.#activeRun.state = Scoop.states.PARTIAL
       this.#activeRun.reason = this.#recordingStop
     }
@@ -566,6 +594,7 @@ export class Scoop {
       return // exit early if the browser and proxy couldn't be launched
     }
 
+    this.#tls.begin(this, page, null)
     await this.#runSteps(steps, page)
 
     //
@@ -576,13 +605,15 @@ export class Scoop {
     }
 
     await this.teardown()
+    this.#finishTlsRun(this)
+    if (this.state === Scoop.states.COMPLETE && this.#tls.hasErrors) this.state = Scoop.states.PARTIAL
   }
 
   async #capturePages () {
     const storage = multipageState(this)
     const inventory = storage.data
-    const outcomeState = () => {
-      if (inventory.pages.every(p => p.outcome === 'complete') && !this.#recordingStop && !this.#sessionFailed) return Scoop.states.COMPLETE
+    const outcomeState = (sessionFailed = this.#sessionFailed) => {
+      if (inventory.pages.every(p => p.outcome === 'complete') && !this.#recordingStop && !sessionFailed && !this.#tls.hasErrors) return Scoop.states.COMPLETE
       if (inventory.pages.some(p => ['complete', 'partial'].includes(p.outcome))) return Scoop.states.PARTIAL
       return Scoop.states.FAILED
     }
@@ -632,6 +663,7 @@ export class Scoop {
           scratch = await createArtifactScratchDirectory(this.captureTmpFolderPath)
           run.captureTmpFolderPath = scratch.path + '/'
           page = await this.#context.newPage()
+          this.#tls.begin(run, page)
           await page.setViewportSize({ width: this.options.captureWindowX, height: this.options.captureWindowY })
           const session = await this.#context.newCDPSession(page)
           await session.send('Network.enable')
@@ -658,6 +690,7 @@ export class Scoop {
             this.log.warn(`[${row.id}] Page cleanup failed (${formatErrorMessage(error)}).`)
           }
           unobserve?.()
+          this.#finishTlsRun(run)
           run.exchangeEnd = this.intercepter.exchanges.length
           const { chain, ...observation } = associateTarget(run, this.intercepter.exchanges)
           Object.assign(row, observation)
@@ -692,19 +725,22 @@ export class Scoop {
           stepController: new AbortController()
         }
         this.#activeRun = global
+        this.#tls.begin(global)
         await this.#runSteps(this.#captureSteps().filter(step => step.global), null, global)
         global.active = false
+        this.#tls.end(global)
         this.#activeRun = null
       }
     } finally {
+      const sessionFailed = this.#sessionFailed
       clearTimeout(this.#captureTimer)
-      const finalState = setupFailed ? Scoop.states.FAILED : outcomeState()
       // Close every shared resource even if validation or a helper failed.
       try { await this.intercepter.teardown() } finally {
         try { await this.#browser?.close() } finally {
           this.exchanges = this.intercepter.exchanges.concat(this.exchanges)
           this.#activeRun = null
-          this.state = finalState
+          this.#unobserveTls?.()
+          this.state = setupFailed ? Scoop.states.FAILED : outcomeState(sessionFailed)
           await this.#removeScratchDirectory()
         }
       }
@@ -730,16 +766,21 @@ export class Scoop {
       // Edge cases requiring immediate interruption
       //
       let shouldStop = false
+      const primaryTlsFailure = this.#tls.failed(run)
+      if (primaryTlsFailure) {
+        run.state = Scoop.states.FAILED
+        if (run !== this) run.reason = 'tls_validation_failed'
+      }
 
       // Page is a web document and is still "about:blank" after step #2
-      if (page && run.targetUrlIsWebPage && i > 1 && page.url() === 'about:blank') {
+      if (!primaryTlsFailure && page && run.targetUrlIsWebPage && i > 1 && page.url() === 'about:blank') {
         this.log.error('Navigation to page failed (about:blank).')
         if (run !== this) run.reason = 'navigation_error'
         shouldStop = true
       }
 
       // Page was closed
-      if (page && run.targetUrlIsWebPage && page.isClosed() && !run.limitClosed && !this.#browserClosedAfterSnapshotTimeout) {
+      if (!primaryTlsFailure && page && run.targetUrlIsWebPage && page.isClosed() && !run.limitClosed && !this.#browserClosedAfterSnapshotTimeout) {
         this.log.error('Page closed before it could be captured.')
         if (run !== this) run.reason = 'page_closed'
         shouldStop = true
@@ -765,7 +806,7 @@ export class Scoop {
       let operation
       try {
         // Only if state is `CAPTURE`, unless `alwaysRun` is set for step
-        let shouldRun = run.state === Scoop.states.CAPTURE || step.alwaysRun === true
+        let shouldRun = (run.state === Scoop.states.CAPTURE || step.alwaysRun === true) && !(primaryTlsFailure && !step.global)
 
         // BUT: `webPageOnly` takes precedence - allows for skipping unnecessary steps when capturing non-web content
         if (run.targetUrlIsWebPage === false && step.webPageOnly) {
@@ -789,16 +830,18 @@ export class Scoop {
           // Check capture state every second - so current step can be interrupted if state changes
           new Promise(resolve => {
             stateCheckInterval = setInterval(() => {
-              if (run.state !== Scoop.states.CAPTURE && step.alwaysRun !== true) {
+              if (this.#tls.failed(run) || (run.state !== Scoop.states.CAPTURE && step.alwaysRun !== true)) {
                 resolve(true)
               }
             }, 1000)
           })
         ])
-        record.outcome = interrupted ? 'interrupted' : 'completed'
-        if (interrupted && run !== this) {
-          run.stepController.abort()
-          if (this.options.attachmentsBypassLimits && page && !page.isClosed()) {
+        record.outcome = this.#tls.failed(run) ? 'failed' : interrupted ? 'interrupted' : 'completed'
+        if (interrupted && (run !== this || this.#tls.failed(run))) {
+          run.stepController?.abort()
+          if (this.#tls.failed(run)) {
+            await page?.close().catch(() => {})
+          } else if (this.options.attachmentsBypassLimits && page && !page.isClosed()) {
             // Stop admitted network work, keeping the document for eligible attachments.
             const session = await this.#context.newCDPSession(page)
             try { await session.send('Page.stopLoading') } finally { await session.detach() }
@@ -818,6 +861,10 @@ export class Scoop {
       // - Only deliver full trace if error is not due to time / size limit reached.
       //
       } catch (err) {
+        if (this.#tls.failed(run)) {
+          run.state = Scoop.states.FAILED
+          if (run !== this) run.reason = 'tls_validation_failed'
+        }
         if (run.state === Scoop.states.PARTIAL && (run === this || ['capture_timeout', 'capture_size_limit', 'snapshot_timeout', 'non_web_capture'].includes(run.reason))) {
           this.log.warn(`${run === this ? '' : `[${run.id || 'capture'}] `}STEP [${i + 1}/${steps.length}]: ${step.name} - ended due to max time or size reached.`)
           record.outcome = 'limit'
@@ -908,6 +955,7 @@ export class Scoop {
     })
 
     this.#context = context
+    this.#unobserveTls = this.#tls.observe(context)
     if (multipageState(this)) {
       context.on('page', page => {
         const run = this.#activeRun
@@ -926,7 +974,7 @@ export class Scoop {
     }
     const page = multipageState(this) ? null : await context.newPage()
 
-    page?.setViewportSize({
+    await page?.setViewportSize({
       width: options.captureWindowX,
       height: options.captureWindowY
     })
@@ -954,6 +1002,7 @@ export class Scoop {
     this.log.info('Closing browser and intercepter')
     await this.intercepter.teardown()
     await this.#browser?.close()
+    this.#unobserveTls?.()
 
     this.exchanges = this.intercepter.exchanges.concat(this.exchanges)
 
@@ -1025,6 +1074,7 @@ export class Scoop {
       contentType = headRequest.headers.get('Content-Type')
       contentLength = headRequest.headers.get('Content-Length')
     } catch (err) {
+      if (this.#tls.record(err, { run, target: run.url, phase: 'head', primary: true })) throw err
       this.log.trace(err)
       this.log.warn('Resource type detection failed - skipping')
       return
@@ -1089,14 +1139,19 @@ export class Scoop {
         '--header', `User-Agent: ${userAgent}`,
         '--output', '/dev/null',
         '--proxy', `http://${this.options.proxyHost}:${this.options.proxyPort}`,
-        '--insecure', // TBD: SSL checks are delegated to the proxy
+        '--insecure', // Trust the local MITM; the proxy verifies the origin.
         '--location',
         // This will be the only capture step running:
         // use all available time - time spent on first request
         '--max-time', String(run === this ? Math.floor(timeout / 1000) : timeout / 1000)
       ]
 
-      await exec('curl', curlOptions, { timeout, ...(run === this ? {} : { signal: run.stepController.signal }) })
+      this.#tls.helper(run, true)
+      try {
+        await exec('curl', curlOptions, { timeout, ...(run === this ? {} : { signal: run.stepController.signal }) })
+      } finally {
+        this.#tls.helper(run, false)
+      }
       if (run !== this) run.helperFinished = !this.#recordingStop
     } catch (err) {
       this.log.trace(err)
@@ -1107,6 +1162,7 @@ export class Scoop {
     // - Set capture state to PARTIAL if _anything_ was captured.
     // - Leave capture state to CAPTURE otherwise.
     //
+    if (this.#tls.failed(run)) throw this.#tls.failed(run)
     const observed = this.intercepter.exchanges.slice(run === this ? 0 : run.exchangeStart)
     if (observed.length > 0) {
       const intercepted = observed[0]?.response?.body?.byteLength
@@ -1172,7 +1228,7 @@ export class Scoop {
           '--header', `User-Agent: ${userAgent}`,
           '--output', '/dev/null',
           '--proxy', `http://${this.options.proxyHost}:${this.options.proxyPort}`,
-          '--insecure', // TBD: SSL checks are delegated to the proxy
+          '--insecure', // Trust the local MITM; the proxy verifies the origin.
           '--max-time', String(Math.floor(timeout / 1000))
         ]
 
@@ -1684,6 +1740,7 @@ export class Scoop {
    * @returns {boolean} true if generated exchange is successfully added
    */
   addGeneratedExchange (url, headers, body, isEntryPoint = false, description = '', run = this) {
+    if (this.#tls.failed(run)) return false
     if (multipageState(this)) {
       if (run !== this && !run.active) return false
       if (!this.options.attachmentsBypassLimits &&
@@ -1837,6 +1894,7 @@ export class Scoop {
    * @property {?string[]} attachments.videoExtractedSubtitles - Filenames
    * @property {?string[]} attachments.certificates - Filenames
    * @property {?object} provenanceInfo - See {@link Scoop.provenanceInfo}. Only populated if the "provenanceSummary" option was turned on.
+   * @property {ScoopCaptureError[]} errors - Structured TLS failures, independent of provenance.
    * @property {object[]} steps - See {@link Scoop.steps}.
    */
 
@@ -1852,6 +1910,7 @@ export class Scoop {
       if (this.options.provenanceSummary && provenanceInfo.multipage) provenanceInfo.multipage = inventory
       return {
         state: this.state,
+        errors: this.errors,
         states: Object.keys(Scoop.states),
         targetUrl: this.url,
         targetUrlResolved: first.resolvedUrl || this.url,
@@ -1869,6 +1928,7 @@ export class Scoop {
     }
     const summary = {
       state: this.state,
+      errors: this.errors,
       states: Object.keys(Scoop.states), // So summary.states[summary.state] = 'NAME-OF-STATE'
       targetUrl: this.url,
       targetUrlResolved: this.targetUrlResolved,
