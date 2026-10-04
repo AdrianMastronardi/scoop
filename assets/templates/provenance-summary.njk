@@ -89,6 +89,20 @@
   <body>
     
     <main>
+      {% if multipage %}
+      <section>
+        <h2>Requested pages</h2>
+        <p>These URLs were captured sequentially in one browser session, sharing cookies and origin storage. This is not a simultaneous snapshot. Page outcomes retain Scoop's capture semantics and do not certify successful replay.</p>
+        <p>Page work: {{ multipage.startedAt | escape }} to {{ multipage.finishedAt | escape }}. Global finalization follows this interval.</p>
+        <table>
+          <tr><th>Page</th><th>Requested URL</th><th>Outcome</th><th>Reason</th><th>Started</th><th>Finished</th></tr>
+          {% for page in multipage.pages %}
+          <tr><td>{{ page.id | escape }}</td><td>{{ page.requestedUrl | escape }}</td><td>{{ page.outcome | escape }}</td><td>{{ page.reason | escape }}</td><td>{{ page.startedAt | escape }}</td><td>{{ page.finishedAt | escape }}</td></tr>
+          {% endfor %}
+        </table>
+      </section>
+      {% endif %}
+
 
       <header>
         <h1>Provenance Summary</h1>

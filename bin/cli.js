@@ -28,7 +28,9 @@ program
 //
 // I-O options and args
 //
-program.arguments('<url>')
+program.arguments('<urls...>')
+program.addOption(new Option('--deduplicate-payloads', 'Deduplicate identical eligible WARC payloads (default: false); does not reduce received bytes or raw storage.'))
+program.addHelpText('after', '\nMultiple URLs share one browser session and one time/size budget. The default 60-second budget is sized for one page; allow roughly 60 seconds per page, more for slow pages or video. Inspect the JSON summary for per-page results; exit 0 means an archive was written, not full coverage.\n')
 
 program.addOption(
   new Option('-o, --output <string>', 'Output path.')
@@ -115,7 +117,7 @@ program.addOption(
 program.addOption(
   new Option(
     '--capture-timeout <number>',
-    'Maximum time allocated to capture process before hard cut-off, in ms.')
+    'Time budget shared by all target URLs, in ms (default: 60000 for the whole list).')
     .default(defaults.captureTimeout)
 )
 
@@ -191,7 +193,7 @@ program.addOption(
 program.addOption(
   new Option(
     '--max-capture-size <number>',
-    'Size limit for the capture\'s exchanges list, in bytes.')
+    'Received-byte budget shared by all target URLs, in bytes.')
     .default(defaults.maxCaptureSize)
 )
 
@@ -463,7 +465,8 @@ program.action(async (name, options, command) => {
   // Capture
   //
   try {
-    url = command.processedArgs[0]
+    const urls = command.processedArgs[0]
+    url = urls.length === 1 ? urls[0] : urls
     capture = await Scoop.capture(url, options)
 
     // A failed capture should make the CLI bail

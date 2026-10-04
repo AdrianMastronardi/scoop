@@ -216,7 +216,7 @@
 
         {% if metadataSaved %}
         <li>
-          <a href="video-extracted-metadata.json">Video metadata</a>
+          <a href="{{ metadataFilename or 'video-extracted-metadata.json' }}">Video metadata</a>
         </li>
         {% endif %}
 

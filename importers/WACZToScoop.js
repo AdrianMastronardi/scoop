@@ -1,4 +1,5 @@
 import path from 'path'
+import { restoreMultipage } from '../utils/multipage.js'
 import { URL } from 'url'
 import { createServer, request } from 'http'
 import { Readable, PassThrough } from 'node:stream'
@@ -32,24 +33,29 @@ const parsers = {
  */
 export async function WACZToScoop (zipPath) {
   const zip = new StreamZip.async({ file: zipPath }) // eslint-disable-line
-  const datapackage = await getDataPackage(zip)
-  // Archived options describe the original capture; they are not trusted runtime configuration.
-  const capture = Scoop.fromArchive(datapackage.mainPageUrl)
-
-  Object.assign(capture, {
-    // TODO: id assignment was skipped during the transition to js-wacz. To reconsider?
-    startedAt: new Date(datapackage.mainPageDate),
-    exchanges: await getExchanges(zip),
-    state: Scoop.states.RECONSTRUCTED
-  })
-
-  // Only set `provenanceInfo` if available.
-  if (datapackage?.extras?.provenanceInfo) {
-    capture.provenanceInfo = datapackage?.extras?.provenanceInfo
+  try {
+    const datapackage = await getDataPackage(zip)
+    const inventory = datapackage?.extras?.multipage
+    const hasInventory = Object.hasOwn(datapackage.extras || {}, 'multipage')
+    if (hasInventory && (!inventory || inventory.version !== 1 || !Array.isArray(inventory.urls) || !inventory.urls.length)) throw new Error('Unsupported or invalid multipage archive')
+    // Archived options remain descriptive data, never runtime instructions.
+    const capture = Scoop.fromArchive(hasInventory ? inventory.urls[0] : datapackage.mainPageUrl)
+    Object.assign(capture, {
+      startedAt: new Date(hasInventory ? inventory.startedAt : datapackage.mainPageDate),
+      exchanges: await getExchanges(zip, hasInventory),
+      state: Scoop.states.RECONSTRUCTED
+    })
+    if (hasInventory) {
+      restoreMultipage(capture, inventory)
+      capture.targetUrlResolved = inventory.pages[0].resolvedUrl || capture.url
+      capture.pageInfo = structuredClone(inventory.pages[0].pageInfo)
+      capture.steps = inventory.pages.flatMap(page => page.steps).sort((a, b) => Number(a.id.slice(5)) - Number(b.id.slice(5)))
+    }
+    if (datapackage?.extras?.provenanceInfo) capture.provenanceInfo = datapackage.extras.provenanceInfo
+    return capture
+  } finally {
+    await zip.close()
   }
-
-  await zip.close()
-  return capture
 }
 
 /**
@@ -71,7 +77,7 @@ const getDataPackage = async (zip) => {
  * @returns {ScoopProxyExchange[]} an array of reconstructed ScoopProxyExchanges
  * @private
  */
-const getExchanges = async (zip) => {
+const getExchanges = async (zip, multipage = false) => {
   const exchanges = []
   const generatedExchanges = []
 
@@ -83,6 +89,7 @@ const getExchanges = async (zip) => {
     return acc
   }, {})
 
+  if (!zipDirs.raw) throw new Error('Reconstruction requires a WACZ with raw exchanges')
   const warcEntriesByDigest = {}
   const rawPayloadDigests = zipDirs.raw.map(name => path.basename(name).split('_')[3])
     .filter(digest => digest)
@@ -94,7 +101,7 @@ const getExchanges = async (zip) => {
     for await (const record of warc) {
       // Get data for rehydrating regular exchanges
       const digest = record.warcHeader('WARC-Payload-Digest')
-      if (rawPayloadDigests.includes(digest)) {
+      if (record.warcType === 'response' && rawPayloadDigests.includes(digest)) {
         warcEntriesByDigest[digest] = Buffer.from(await record.readFully(false))
       }
 
@@ -106,6 +113,12 @@ const getExchanges = async (zip) => {
           id: record.warcHeaders.headers.get(EXCHANGE_ID_HEADER_LABEL),
           date: new Date(record.warcHeaders.headers.get('WARC-Date')),
           description: record.warcHeaders.headers.get(EXCHANGE_DESCRIPTION_HEADER_LABEL),
+          ...(multipage
+            ? {
+                pageId: record.warcHeader('Scoop-Page-ID') || undefined,
+                sourceUrl: record.warcHeader('Scoop-Source-URL') || undefined
+              }
+            : {}),
           response: {
             startLine: record.httpHeaders.statusline,
             headers: new Headers(record.getResponseInfo().headers),
@@ -134,7 +147,7 @@ const getExchanges = async (zip) => {
           id,
           date: parseRawResourceDate(date),
           [`${type}Raw`]: combined,
-          [`${type}Parsed`]: await parsers[type](combined)
+          ...(combined.includes('\r\n\r\n') ? { [`${type}Parsed`]: await parsers[type](combined) } : {})
         }
       })
   )

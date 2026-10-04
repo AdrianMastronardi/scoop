@@ -1,7 +1,7 @@
 {
   "name": "@harvard-lil/scoop",
   "version": "0.7.1-dev.0",
-  "description": "\ud83c\udf68 High-fidelity, browser-based, single-page web archiving library and CLI.",
+  "description": "\ud83c\udf68 High-fidelity, browser-based web archiving library and CLI for one page or an explicit URL list.",
   "main": "Scoop.js",
   "type": "module",
   "bin": {

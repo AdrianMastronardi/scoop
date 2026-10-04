@@ -23,4 +23,10 @@ export class ScoopGeneratedExchange extends ScoopExchange {
 
   /** @type {?string} */
   description
+
+  /** @type {?string} Owning page in array-mode archives. */
+  pageId
+
+  /** @type {?string} Requested page URL; never an origin HTTP header. */
+  sourceUrl
 }

@@ -1,4 +1,5 @@
 import fs from 'fs/promises'
+import { multipageSnapshot } from '../utils/multipage.js'
 import { createReadStream } from 'fs'
 import { sep } from 'path'
 
@@ -31,6 +32,9 @@ export async function scoopToWACZ (capture, includeRaw = false, signingServer) {
       [Scoop.states.PARTIAL, Scoop.states.COMPLETE].includes(capture.state) === false) {
     throw new Error('`capture` must be a partial or complete Scoop object.')
   }
+
+  const inventory = multipageSnapshot(capture)
+  const firstPage = inventory?.pages.find(page => page.entryPoint)
 
   /** @type {?string} */
   let outputDir = null
@@ -101,8 +105,8 @@ export async function scoopToWACZ (capture, includeRaw = false, signingServer) {
       detectPages: false,
       log: capture.log,
       // Capture info
-      url: capture.url,
-      ts: capture.startedAt,
+      url: inventory ? firstPage?.entryPoint.url : capture.url,
+      ts: inventory ? firstPage?.entryPoint.ts : capture.startedAt,
       title: capture.pageInfo?.title
         ? capture.pageInfo.title
         : capture.url,
@@ -113,11 +117,15 @@ export async function scoopToWACZ (capture, includeRaw = false, signingServer) {
       signingUrl: signingServer?.url,
       signingToken: signingServer?.token,
       datapackageExtras: {
+        ...(inventory ? { multipage: inventory } : {}),
         state: capture.state,
         states: Object.keys(Scoop.states),
         provenanceInfo: capture.options.provenanceSummary ? capture.provenanceInfo : null
       }
     })
+    // js-wacz defaults ts to now even when the option is omitted. No recorded
+    // target means neither replay-start hint may be advertised.
+    if (inventory && !firstPage) transformer.ts = null
   } catch (err) {
     capture.log.trace(err)
     await clearOutputDir()
@@ -129,7 +137,11 @@ export async function scoopToWACZ (capture, includeRaw = false, signingServer) {
   //
   try {
     // First page
-    if (firstExchange) {
+    if (inventory) {
+      for (const page of inventory.pages) {
+        if (page.entryPoint) transformer.addPage(page.entryPoint.url, page.pageInfo.title || page.requestedUrl, page.entryPoint.ts)
+      }
+    } else if (firstExchange) {
       transformer.addPage(
         firstExchange.url,
         `High-Fidelity Web Capture of ${firstExchange.url}`,
@@ -184,7 +196,7 @@ export async function scoopToWACZ (capture, includeRaw = false, signingServer) {
           const dataHash = await transformer.sha256(data)
           const destination = rawResourceName(type, exchange.date, exchange.id)
 
-          if (warcPayloadDigests.includes(dataHash)) {
+          if (!inventory && !capture.options.deduplicatePayloads && warcPayloadDigests.includes(dataHash)) {
             await transformer.addFileToZip(getHead(data), destination) // Add only the head and trailing CRLF
           } else {
             await transformer.addFileToZip(data, destination)

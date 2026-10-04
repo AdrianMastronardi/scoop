@@ -4,12 +4,17 @@
 
 ### Compatibility notes
 
+- **Array captures are opt-in.** A URL string and one CLI URL retain single-page behavior. Arrays (including one-element arrays) use strict URL validation, shared session/time/size budgets, blocked service workers, primary-page cache bypass, per-page artifact names and strict archive serialization. CLI exit 0 can represent partial coverage; inspect the page inventory.
+
 - **Summaries of failed captures.** `--json-summary-output` is now written for failed captures too, with `state` set to FAILED, and the CLI still exits 1. Callers that treated the file's existence as success should check `state`.
 - **Version between releases.** Main carries the next version as a prerelease, e.g. `0.7.1-dev.0`. A copy installed from a GitHub commit reports that commit as build metadata, e.g. `0.7.1-dev.0+0031ff8`, in provenance and `--version`.
 - **Raw exchange file names.** In WACZs that include raw exchanges (`wacz-with-raw`, `toWACZ(true)`), files are named with a 17-digit UTC timestamp, `raw/request_20260708152143602_<id>`, rather than an ISO timestamp, which the WACZ resource-name pattern does not allow (#417). `Scoop.fromWACZ()` reads both forms.
 - **Operating system in provenance.** Drop unmaintained `get-os` dependency and set `osName` and `osVersion` from our own OS-specific checks. On Debian they change from `Debian` / `12.15` to `Debian GNU/Linux` / `12.15 (bookworm)`. They are `null` when the system cannot be identified.
 
 ### Additions
+
+- Capture an explicit ordered URL list with `Scoop.capture(urls, options)` or multiple CLI URLs. The archive includes versioned per-page outcomes, recorded navigation entries and source-associated artifacts; raw-enabled reconstruction restores this metadata.
+- Optional `deduplicatePayloads` / `--deduplicate-payloads` stores eligible identical WARC response payloads using direct revisit references. Disabled by default; preserves observation headers, all network requests and full raw exchanges.
 
 - `screenshotMaxWidth` and `screenshotMaxHeight` (`--screenshot-max-width`, `--screenshot-max-height`) clip the full-page screenshot to the top left of the page. The default, `0`, leaves it unbounded. Unbounded, a very tall page can take the browser several gigabytes to render; clipped at 16,000 pixels high, pages that had exhausted a 5 GiB memory limit peaked at about 1.4 GB.
 - The capture summary has a `steps` list: each step's name, start time, duration, and outcome (`completed`, `failed`, `limit`, `interrupted`, or `skipped`).

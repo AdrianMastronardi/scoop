@@ -6,6 +6,7 @@ import * as CONSTANTS from './constants.js'
 /** @type {ScoopOptions} */
 export const defaults = {
   logLevel: 'info',
+  deduplicatePayloads: false,
 
   screenshot: true,
   pdfSnapshot: false,
@@ -103,6 +104,9 @@ export const testDefaults = {
  * @returns {ScoopOptions}
  */
 export function filterOptions (newOptions = {}) {
+  if (newOptions != null && 'deduplicatePayloads' in Object(newOptions) && typeof newOptions.deduplicatePayloads !== 'boolean') {
+    throw new TypeError('"deduplicatePayloads" must be a primitive boolean')
+  }
   const options = {}
 
   // Create new option object from `newOptions` and `defaults`:

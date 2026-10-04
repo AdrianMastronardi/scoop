@@ -84,9 +84,10 @@ export class ScoopIntercepter {
    * the capture's limit and, if so, stops intercepting exchanges.
    */
   checkAndEnforceSizeLimit () {
-    if (this.byteLength >= this.options.maxCaptureSize && this.capture.state === Scoop.states.CAPTURE) {
-      this.capture.log.warn(`Max size ${this.options.maxCaptureSize} reached. Ending interception.`)
-      this.capture.state = Scoop.states.PARTIAL
+    if (this.byteLength + this.capture.generatedByteLength >= this.options.maxCaptureSize && this.capture.state === Scoop.states.CAPTURE) {
+      if (this.capture.stopRecording('capture_size_limit')) {
+        this.capture.log.warn(`Max size ${this.options.maxCaptureSize} reached. Ending interception.`)
+      }
       this.recordExchanges = false
     }
   }

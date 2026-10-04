@@ -2,6 +2,9 @@ import crypto from 'crypto'
 
 import { WARCRecord, WARCSerializer } from 'warcio'
 
+import { payloadDeduplicator } from './payload-deduplication.js'
+import { multipageState, validateInventory, validateSource } from '../utils/multipage.js'
+
 import * as CONSTANTS from '../constants.js'
 import { Scoop } from '../Scoop.js'
 import { ScoopGeneratedExchange } from '../exchanges/index.js'
@@ -23,7 +26,16 @@ if (!globalThis.crypto) {
  * @returns {Promise<ArrayBuffer|Uint8Array>}
  */
 export async function scoopToWARC (capture, gzip = false) {
+  return (await serializeWARC(capture, gzip)).data
+}
+
+/** Serialize and retain the successful response map for WACZ entry validation. */
+export async function serializeWARC (capture, gzip = false) {
   let serializedInfo = null
+  const inventory = multipageState(capture)
+  if (inventory) validateInventory(inventory.data, capture.exchanges, capture.state === Scoop.states.RECONSTRUCTED ? undefined : capture.steps)
+  const dedup = capture.options.deduplicatePayloads ? payloadDeduplicator(capture.exchanges) : null
+  const records = new Map()
 
   const serializedRecords = []
 
@@ -66,8 +78,10 @@ export async function scoopToWARC (capture, gzip = false) {
       }
 
       try {
+        const candidate = type === 'response' ? dedup?.candidate(exchange) : null
+        const source = candidate?.source
         async function * content () {
-          yield msg.body
+          if (!source) yield msg.body
         }
 
         const warcHeaders = {}
@@ -77,28 +91,53 @@ export async function scoopToWARC (capture, gzip = false) {
 
         // Add `WARC-Refers-To-Target-URI` to associate generated exchanges with their origin.
         if (exchange instanceof ScoopGeneratedExchange) {
-          warcHeaders['WARC-Refers-To-Target-URI'] = capture.url
+          validateSource(exchange, inventory?.data)
+          if (inventory) {
+            if (exchange.pageId) {
+              warcHeaders['Scoop-Page-ID'] = exchange.pageId
+              warcHeaders['Scoop-Source-URL'] = exchange.sourceUrl
+            }
+          } else warcHeaders['WARC-Refers-To-Target-URI'] = capture.url
         }
 
         if (exchange.description) {
           warcHeaders[CONSTANTS.EXCHANGE_DESCRIPTION_HEADER_LABEL] = exchange.description
         }
 
+        if (source) {
+          Object.assign(warcHeaders, {
+            'WARC-Profile': 'http://netpreserve.org/warc/1.1/revisit/identical-payload-digest',
+            'WARC-Payload-Digest': candidate.hash,
+            'WARC-Refers-To': source.id,
+            'WARC-Refers-To-Target-URI': source.url,
+            'WARC-Refers-To-Date': source.date,
+            'WARC-Truncated': 'length'
+          })
+        }
+        const rawHeaders = (inventory || dedup) && exchange[`${type}Parsed`]?.rawHeaders
+        const httpHeaders = rawHeaders
+          ? Array.from({ length: rawHeaders.length / 2 }, (_, i) => [rawHeaders[i * 2], rawHeaders[i * 2 + 1]])
+          : Object.fromEntries(msg.headers.entries())
         const record = WARCRecord.create(
           {
             url: exchange.url,
             date: exchange.date.toISOString(),
-            type,
+            type: source ? 'revisit' : type,
             warcVersion: `WARC/${CONSTANTS.WARC_VERSION}`,
             statusline: msg.startLine,
-            httpHeaders: Object.fromEntries(msg.headers.entries()),
+            httpHeaders,
             warcHeaders
           },
           content()
         )
 
         serializedRecords.push(await WARCSerializer.serialize(record, { gzip }))
+        if (type === 'response') {
+          records.set(exchange.id, record)
+          dedup?.register(candidate, exchange, record)
+        }
       } catch (err) {
+        if (inventory || dedup) throw err
         capture.log.warn(`${msg.url} ${type} could not be added to warc.`)
         capture.log.trace(err)
       }
@@ -127,7 +166,14 @@ export async function scoopToWARC (capture, gzip = false) {
     offset += record.length
   }
 
-  return warc
+  if (inventory) {
+    for (const page of inventory.data.pages) {
+      if (!page.entryPoint) continue
+      const chain = inventory.chains.get(page.id)
+      if (chain && (!chain.length || chain.some(id => !records.has(id)))) throw new Error(`Missing serialized navigation chain for ${page.id}`)
+    }
+  }
+  return { data: warc, records }
 
   // TODO: Investigate why this no longer works in latest Node 19.X.
   // return new Blob([serializedInfo, ...serializedRecords]).arrayBuffer()
