@@ -1855,6 +1855,7 @@ export class Scoop {
 
   /**
    * (Shortcut) Export this Scoop capture to WARC.
+   * Returns the whole WARC, so needs memory in proportion to it: see `toWARCFile`.
    * @param {boolean} [gzip=false]
    * @returns {Promise<ArrayBuffer>}
    */
@@ -1863,7 +1864,26 @@ export class Scoop {
   }
 
   /**
+   * (Shortcut) Export this Scoop capture to a new WARC file, without holding the WARC in memory.
+   *
+   * Resolves once the complete file is closed and at `path`, which names nothing before that.
+   * Rejects with `EEXIST`, leaving it as it is, if `path` exists.
+   *
+   * `toWACZFile` calls this method to write the WARC it packs. To keep that WARC,
+   * override it, await the original, then copy or hard link the file to a place of your own:
+   * `toWACZFile` waits for this method before going any further, and fails if it does.
+   *
+   * @param {string} path - Where to write the WARC. Its directory must exist, on a filesystem with hard links.
+   * @param {boolean} [gzip=false]
+   * @returns {Promise<void>}
+   */
+  async toWARCFile (path, gzip = false) {
+    await exporters.scoopToWARCFile(this, path, Boolean(gzip))
+  }
+
+  /**
    * (Shortcut) Export this Scoop capture to WACZ.
+   * Returns the whole WACZ, so needs memory in proportion to it: see `toWACZFile`.
    * @param {boolean} [includeRaw=true] - Include a copy of RAW HTTP exchanges to the wacz (under `/raw`)?
    * @param {object} signingServer - Optional server information for signing the WACZ
    * @param {string} signingServer.url - url of the signing server
@@ -1872,6 +1892,24 @@ export class Scoop {
    */
   async toWACZ (includeRaw = true, signingServer) {
     return await exporters.scoopToWACZ(this, includeRaw, signingServer)
+  }
+
+  /**
+   * (Shortcut) Export this Scoop capture to a new WACZ file, without holding the WACZ or its WARC in memory.
+   *
+   * Resolves once the complete file is closed and at `path`, which names nothing before that.
+   * Rejects with `EEXIST`, leaving it as it is, if `path` exists.
+   * Intermediate files are written beside `path`, and removed.
+   *
+   * @param {string} path - Where to write the WACZ. Its directory must exist, on a filesystem with hard links.
+   * @param {boolean} [includeRaw=true] - Include a copy of RAW HTTP exchanges to the wacz (under `/raw`)?
+   * @param {object} signingServer - Optional server information for signing the WACZ
+   * @param {string} signingServer.url - url of the signing server
+   * @param {string} signingServer.token - Optional token to be passed to the signing server via the Authorization header
+   * @returns {Promise<void>}
+   */
+  async toWACZFile (path, includeRaw = true, signingServer) {
+    await exporters.scoopToWACZFile(this, path, includeRaw, signingServer)
   }
 
   /**

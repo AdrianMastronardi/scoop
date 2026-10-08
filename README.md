@@ -325,6 +325,44 @@ On Node 24.15.0, Playwright 1.63.0 and Chromium 153.0.8010.12, both full respons
 
 In that fixture, all six intercepted responses met the eligibility rules; two later payloads reused earlier complete responses. Plain WARC size fell from about 550 KB to 316 KB, and raw-free WACZ from 133 KB to 103 KB. Raw-enabled WACZ fell only from 614 KB to 584 KB because every raw body remains. Generated screenshots and DOM files stay in full. Exact byte counts, hashes and observed selections are recorded in `evidence.json`; this is fixture-specific storage evidence, not a network or performance claim.
 
+### Export to a file
+
+`toWARC()` and `toWACZ()` return the whole archive, and `toWACZ()` builds it from the whole WARC: on top of the capture, they need memory in proportion to it. `toWARCFile()` and `toWACZFile()` write the same archives to a file without holding them in memory. They take a path, then the arguments of `toWARC()` and `toWACZ()`, and resolve with no value once the complete file is closed and at that path.
+
+```javascript
+import { Scoop } from '@harvard-lil/scoop'
+
+const capture = await Scoop.capture('https://lil.law.harvard.edu')
+
+await capture.toWACZFile('archive.wacz')
+await capture.toWARCFile('archive.warc.gz', true)
+```
+
+- **Destination.** The path names a new file in an existing directory, absolute or relative to the working directory. The archive is written in a private directory beside it, `.scoop-export-*`, and hard linked to its name once complete: until then the path names nothing, and the filesystem must support hard links. A file or symbolic link already at that path is neither replaced nor followed, and the export rejects with `EEXIST`, as does the later of two exports to one path. The file is created with mode `0600`.
+- **Intermediate files.** The WARC that a WACZ is built from, and what the WACZ generator stages, go to that same private directory and to no temporary directory elsewhere. Choose a destination on disk: on a filesystem held in memory, such as a `tmpfs`, these files count as memory. The directory is removed whether the export succeeds or fails. If it cannot be removed, `capture.log` gets a warning that names it, and the outcome of the export stands.
+- **Errors.** A failed export publishes nothing and is not retried. `toWARCFile()` rejects with the error as it occurred. `toWACZFile()` rejects with an error that names the step that failed, keeps the original as its `cause`, and takes its `code`, such as `ENOSPC`, `EFBIG`, `EACCES` or `EEXIST`. A record that fails once part of it is written fails the whole export.
+- **Durability.** The file is closed, not synchronized: call `fsync` on it and on its directory if a power failure must not lose it.
+- **Memory.** What an export takes on top of the capture does not grow with the archive. Bodies are read where the capture holds them, compressed and written a chunk at a time, and a slow destination holds the serialization back. A WACZ is indexed by a single worker thread, however many processors there are. The exchanges themselves stay in memory, indexes grow with the number of records, a request body is read whole to be indexed, and the runtime frees the chunks it has written when it next collects garbage. Do not modify a capture while it is exported.
+
+`toWACZFile()` writes its WARC by calling `toWARCFile(path, true)` on the capture, and waits for it before indexing, signing or publishing anything. A subclass can override that method to keep the complete WARC, so that it outlives a failure of the steps that follow. Keep it outside of the directory it is written in, which Scoop removes. If the override fails, so does the export.
+
+```javascript
+import { link } from 'node:fs/promises'
+import { Scoop } from '@harvard-lil/scoop'
+
+class RecoverableScoop extends Scoop {
+  async toWARCFile (path, gzip = false) {
+    await super.toWARCFile(path, gzip)
+    // Complete and closed: link it on the same filesystem, or copy it.
+    await link(path, 'recovery/archive.warc.gz')
+  }
+}
+
+const capture = new RecoverableScoop('https://lil.law.harvard.edu')
+await capture.capture()
+await capture.toWACZFile('archive.wacz')
+```
+
 ### Quick access
 - [List of available options for `Scoop.capture()`](https://github.com/harvard-lil/scoop/blob/main/options.types.js)
 - [`Scoop.toWACZ()` method](https://github.com/harvard-lil/scoop/blob/main/Scoop.js#L1138)
@@ -523,6 +561,12 @@ This project uses [Node.js' built-in test runner](https://nodejs.org/api/test.ht
 
 ```bash
 npm run test
+```
+
+The export tests fill and limit filesystems of their own: one of them mounts a `tmpfs` in a user namespace, and is skipped where that is not allowed. The memory test exports the same capture with 16 MiB and 192 MiB of bodies, in new processes, and compares what the exports took. It collects garbage as it measures, to count what an export holds on to rather than what the runtime has yet to free. To take one of its measurements by hand, for example in a container with limited memory, with or without `--expose-gc`:
+
+```bash
+node --expose-gc utils/fixtures/export/measure.mjs 192 tmp
 ```
 
 #### Tests-specific environment variables

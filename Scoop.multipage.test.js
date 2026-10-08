@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import { mkdtemp, writeFile, readFile, rm, access } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, readdir, rm, access } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
@@ -416,12 +417,84 @@ console.log(JSON.stringify({ title: 'fixture', filename: output }))
 test('multipage serialization failures stop WACZ before signing', { timeout: 15000 }, async t => {
   const { base } = await fixture(t)
   const capture = await Scoop.capture([base + '/a'], options)
-  const serialize = WARCSerializer.serialize.bind(WARCSerializer)
-  t.mock.method(WARCSerializer, 'serialize', async (record, options) => {
-    if (record.warcType === 'response') throw new Error('fixture serialization failure')
-    return serialize(record, options)
+  // Records are written as they are serialized, no longer through `serialize()`:
+  // what can fail before any byte of a record is written is `digestRecord()`.
+  const digestRecord = WARCSerializer.prototype.digestRecord
+  t.mock.method(WARCSerializer.prototype, 'digestRecord', async function (...args) {
+    if (this.record.warcType === 'response') throw new Error('fixture serialization failure')
+    return digestRecord.apply(this, args)
   })
   await assert.rejects(capture.toWACZ(false, { url: base + '/sign-must-not-run' }), /fixture serialization failure/)
+})
+
+test('file exports carry the inventory, attachments and deduplicated payloads, and reconstruct', { timeout: 60000 }, async t => {
+  const { base } = await fixture(t)
+  const directory = await mkdtemp(join(tmpdir(), 'scoop-multipage-file-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const capture = await Scoop.capture([base + '/a', base + '/b'], { ...options, screenshot: true, deduplicatePayloads: true })
+  const path = join(directory, 'capture.wacz')
+  await capture.toWACZFile(path)
+  const zip = new StreamZip.async({ file: path }) // eslint-disable-line
+  t.after(() => zip.close())
+  const metadata = JSON.parse(await zip.entryData('datapackage.json'))
+  assert.deepEqual(metadata.extras.multipage, capture.multipage)
+  assert.equal(metadata.mainPageUrl, base + '/a')
+  const pages = (await zip.entryData('pages/pages.jsonl')).toString().trim().split('\n').slice(1).map(line => JSON.parse(line).url)
+  assert.deepEqual(pages.sort(), ['file:///page-0001-screenshot.png', 'file:///page-0002-screenshot.png', base + '/a', base + '/b'])
+  const read = async source => {
+    const records = []
+    for await (const record of new WARCParser(source)) {
+      const body = Buffer.from(await record.readFully(false))
+      records.push({ type: record.warcType, url: record.warcTargetURI, page: record.warcHeader('Scoop-Page-ID'), source: record.warcHeader('Scoop-Source-URL'), ref: record.warcHeader('WARC-Refers-To'), id: record.warcHeader('WARC-Record-ID'), exchange: record.warcHeader('Scoop-Exchange-ID'), length: body.length })
+    }
+    return records
+  }
+  const records = await read(await zip.stream('archive/data.warc.gz'))
+  const resources = records.filter(record => record.url === base + '/resource')
+  assert.deepEqual(resources.map(record => record.type), ['request', 'response', 'request', 'revisit'])
+  assert.equal(resources[3].ref, resources[1].id)
+  assert.equal(resources[3].length, 0)
+  const screenshots = records.filter(record => record.url?.endsWith('-screenshot.png'))
+  assert.deepEqual(screenshots.map(record => [record.page, record.source]), [['page-0001', base + '/a'], ['page-0002', base + '/b']])
+  assert.deepEqual(records.filter(record => record.type !== 'warcinfo' && record.type !== 'request').map(record => record.exchange), capture.exchanges.filter(exchange => exchange.response).map(exchange => exchange.id))
+  const restored = await Scoop.fromWACZ(path)
+  assert.equal(restored.state, Scoop.states.RECONSTRUCTED)
+  assert.deepEqual(restored.multipage, capture.multipage)
+  for (const exchange of capture.exchanges.filter(exchange => exchange.requestRaw)) {
+    const copy = restored.exchanges.find(copy => copy.id === exchange.id)
+    assert.deepEqual(copy.requestRaw, exchange.requestRaw)
+    assert.deepEqual(copy.responseRaw, exchange.responseRaw)
+  }
+  const warc = join(directory, 'restored.warc.gz')
+  await restored.toWARCFile(warc, true)
+  const comparable = records => records.map(({ type, url, page, source, exchange, length }) => ({ type, url, page, source, exchange, length }))
+  assert.deepEqual(comparable(await read(createReadStream(warc))), comparable(await read([await restored.toWARC(true)])))
+  await assert.rejects(restored.toWACZFile(join(directory, 'restored.wacz')), /partial or complete/)
+  assert.deepEqual((await readdir(directory)).sort(), ['capture.wacz', 'restored.warc.gz'])
+})
+
+test('file exports of a capture without entries omit replay hints, and stop before signing when serialization fails', { timeout: 30000 }, async t => {
+  const { base, hits } = await fixture(t)
+  const directory = await mkdtemp(join(tmpdir(), 'scoop-multipage-file-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const capture = await Scoop.capture([base + '/blocked-redirect'], { ...options, blocklist: ['/private/'], screenshot: true })
+  assert.equal(capture.multipage.pages[0].entryPoint, null)
+  const path = join(directory, 'capture.wacz')
+  await capture.toWACZFile(path)
+  const zip = new StreamZip.async({ file: path }) // eslint-disable-line
+  t.after(() => zip.close())
+  const metadata = JSON.parse(await zip.entryData('datapackage.json'))
+  assert.ok(!('mainPageUrl' in metadata))
+  assert.ok(!('mainPageDate' in metadata))
+  assert.deepEqual((await Scoop.fromWACZ(path)).multipage, capture.multipage)
+  const digestRecord = WARCSerializer.prototype.digestRecord
+  t.mock.method(WARCSerializer.prototype, 'digestRecord', async function (...args) {
+    if (this.record.warcType === 'response') throw new Error('fixture serialization failure')
+    return digestRecord.apply(this, args)
+  })
+  await assert.rejects(capture.toWACZFile(join(directory, 'failed.wacz'), false, { url: base + '/sign-must-not-run' }), /fixture serialization failure/)
+  assert.ok(!hits.some(hit => hit.path === '/sign-must-not-run'))
+  assert.deepEqual(await readdir(directory), ['capture.wacz'])
 })
 
 test('CLI preserves multiple positional URLs, partial exit 0, failed summaries and distinct attachments', { timeout: 30000 }, async t => {

@@ -15,6 +15,7 @@
 
 ### Additions
 
+- `toWARCFile(path, gzip)` and `toWACZFile(path, includeRaw, signingServer)` export a capture to a new file without holding the archive in memory, where `toWARC()` and `toWACZ()` return all of it. Intermediate files go beside the destination, which only gets its name once the file is complete, and is never replaced. `toWACZFile()` writes its WARC through `toWARCFile()`, which a subclass can override to keep it. See "Export to a file" in the README.
 - Capture an explicit ordered URL list with `Scoop.capture(urls, options)` or multiple CLI URLs. The archive includes versioned per-page outcomes, recorded navigation entries and source-associated artifacts; raw-enabled reconstruction restores this metadata.
 - Optional `deduplicatePayloads` / `--deduplicate-payloads` stores eligible identical WARC response payloads using direct revisit references. Disabled by default; preserves observation headers, all network requests and full raw exchanges.
 
@@ -23,6 +24,7 @@
 
 ### Fixes
 
+- Index the WARC of a WACZ with one worker thread, and without reading each response whole into memory. The WACZ generator started half as many threads as the machine has processors, for a single WARC, and its indexer took about twice the size of the largest response.
 - Accept response headers up to 256 KiB, Chromium's limit. The proxy and the HEAD request rejected more than Node's default of 16 KiB, so pages with large headers, such as a long Content-Security-Policy, failed.
 - Fix stalls of up to several minutes, usually in the provenance step, on pages that keep streaming after the capture stops recording, such as video or ads. The proxy copied a response's whole body on every chunk it received.
 - Keep the certificate step within its time budget. It could run up to three times its budget, and retried a failed host for every request to it.

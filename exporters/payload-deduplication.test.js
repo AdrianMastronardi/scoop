@@ -92,10 +92,12 @@ test('digest collisions still require byte equality', () => {
 })
 
 test('serialization errors remain legacy omissions by default and fail explicitly with deduplication', async t => {
-  const serialize = WARCSerializer.serialize.bind(WARCSerializer)
-  t.mock.method(WARCSerializer, 'serialize', async (record, options) => {
-    if (record.warcType === 'response') throw new Error('injected serializer failure')
-    return serialize(record, options)
+  // Records are written as they are serialized, no longer through `serialize()`:
+  // what can fail before any byte of a record is written is `digestRecord()`.
+  const digestRecord = WARCSerializer.prototype.digestRecord
+  t.mock.method(WARCSerializer.prototype, 'digestRecord', async function (...args) {
+    if (this.record.warcType === 'response') throw new Error('injected serializer failure')
+    return digestRecord.apply(this, args)
   })
   assert.equal((await responses(await capture([exchange('https://fixture.example/a')], false).toWARC())).length, 0)
   await assert.rejects(capture([exchange('https://fixture.example/a')]).toWARC(), /injected serializer failure/)
