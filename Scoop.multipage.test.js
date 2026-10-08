@@ -313,7 +313,7 @@ test('reconstruction rejects malformed multipage metadata and missing artifact a
   const directory = await mkdtemp(join(tmpdir(), 'scoop-multipage-invalid-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
   const mutations = [
-    data => { data.version = 3 },
+    data => { data.version = 4 },
     data => { data.urls.pop() },
     data => { data.pages[0].id = 'page-00001' },
     data => { data.pages[0].outcome = 'capturing' },

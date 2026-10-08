@@ -2,7 +2,7 @@
 
 import os from 'os'
 import { performance } from 'node:perf_hooks'
-import { initializeMultipage, multipageState, multipageSnapshot, validateUrls, validateInventory, artifactSummary } from './utils/multipage.js'
+import { initializeMultipage, multipageState, multipageSnapshot, validateUrls, validateInventory, validateAssessment, artifactSummary, artifactPrefix, projectedFields, StepFailure, MAX_ATTEMPTS } from './utils/multipage.js'
 import { observeNavigation, associateTarget } from './utils/page-navigation.js'
 import { CaptureTlsErrors } from './utils/tls-errors.js'
 import { readFile, readdir, mkdir, access } from 'fs/promises'
@@ -14,7 +14,7 @@ import logPrefix from 'loglevel-plugin-prefix'
 import nunjucks from 'nunjucks'
 import { Address4, Address6 } from '@laverdet/beaugunderson-ip-address'
 import { v4 as uuidv4 } from 'uuid'
-import { chromium } from 'playwright'
+import { chromium, errors as playwrightErrors } from 'playwright'
 
 import { exec, omitEnvironmentVariables } from './utils/exec.js'
 import { ScoopGeneratedExchange } from './exchanges/index.js'
@@ -30,12 +30,18 @@ import { getOSInfo } from './utils/os-info.js'
 import { getDimensions } from './utils/png.js'
 import { NetworkPolicy, fetchHead } from './utils/network.js'
 import { createCertificateTunnel } from './utils/certificate-tunnel.js'
-import { withSnapshotDeadline } from './utils/snapshot-deadline.js'
+import { withSnapshotDeadline, SnapshotTimeoutError } from './utils/snapshot-deadline.js'
 import { forEachHttpsHostWithinBudget } from './utils/host-budget.js'
 import { createArtifactScratchDirectory, readArtifactFile, removeArtifactScratchDirectory } from './utils/artifact-files.js'
 
 nunjucks.configure(CONSTANTS.TEMPLATES_PATH)
 const archiveReconstruction = Symbol('archiveReconstruction')
+
+/**
+ * How long closing a page of an array capture may take, in ms.
+ * A page still open after that is doing work in the shared session, which ends there.
+ */
+const PAGE_CLOSE_TIMEOUT = 5000
 
 /**
  * @class Scoop
@@ -84,6 +90,7 @@ export class Scoop {
   #generatedBytes = 0
   #stepNumber = 0
   #sessionFailed = false
+  #assessment = null
   #closingPages = new Set()
   #tls = new CaptureTlsErrors()
   #unobserveTls
@@ -103,7 +110,10 @@ export class Scoop {
   trackTlsRequest (request, target) { this.#tls.admit(request, target) }
 
   /** Internal proxy hook: retain verification failures before downstream closure. @ignore */
-  recordProxyTlsError (error, request) { return this.#tls.proxyError(error, request) }
+  recordProxyTlsError (error, request) {
+    this.#tls.policyError(error, request)
+    return this.#tls.proxyError(error, request)
+  }
 
   /** Restore descriptive archive diagnostics, never executable policy. @ignore */
   restoreCaptureErrors (errors) { this.#tls.restore(errors, this.multipage) }
@@ -129,6 +139,8 @@ export class Scoop {
     if (this.#recordingStop) return false
     this.#recordingStop = reason
     this.intercepter.recordExchanges = false
+    // An assessment still pending decides nothing once the session has stopped.
+    this.#assessment?.abort()
     if (this.#activeRun && !this.#tls.failed(this.#activeRun)) {
       this.#activeRun.state = Scoop.states.PARTIAL
       this.#activeRun.reason = this.#recordingStop
@@ -223,6 +235,10 @@ export class Scoop {
    * - `limit`: the step ended because the capture reached its time or size limit.
    * - `interrupted`: the capture left the CAPTURE state while the step was still running; Scoop moved on without waiting for it.
    * - `skipped`: the step did not run.
+   *
+   * In array mode each record also has an `id`, its `pageId` and `attemptNumber` (both null for
+   * global steps) and a `reason`: see {@link ScoopMultipageStep}. The steps of every visit made
+   * to a page are here, in order, while a page of the inventory lists those of its last visit.
    * @type {{name: string, startedAt: string, durationMs: number, outcome: string}[]}
    */
   steps = []
@@ -364,6 +380,8 @@ export class Scoop {
      * @property {?function} main
      * @property {?boolean} alwaysRun - If true, this step will run regardless of capture-level time / size constraints.
      * @property {?boolean} webPageOnly - If true, this step will only run if the target url is a web page. Takes precedence over `alwaysRun`.
+     * @property {?boolean} navigation - If true, this step is the navigation to the target: what its failure is recorded as, in array mode, when nothing says more.
+     * @property {?boolean} artifact - If true, this step generates an attachment: what its failure is recorded as, in array mode, when nothing says more.
      */
 
     /** @type {CaptureStep[]} */
@@ -388,8 +406,11 @@ export class Scoop {
       name: 'Wait for initial page load',
       alwaysRun: false,
       webPageOnly: true,
+      navigation: true,
       main: async (page) => {
         await page.goto(run.url, { waitUntil: 'load', timeout: this.#remaining(options.loadTimeout) })
+        // The proxy answers for a destination that policy refuses: the navigation ends, without its target.
+        if (run !== this && this.#tls.blocked(run)) throw new StepFailure('network_policy_blocked')
       }
     })
 
@@ -480,18 +501,19 @@ export class Scoop {
         name: 'Screenshot',
         alwaysRun: options.attachmentsBypassLimits,
         webPageOnly: true,
+        artifact: true,
         main: async (page) => {
           const url = 'file:///screenshot.png'
           const httpHeaders = new Headers({ 'content-type': 'image/png' })
           const body = await page.screenshot({ fullPage: true, timeout: 5000, ...this.#screenshotClip() })
-          const [width, height] = getDimensions(body)
+          const [width, height] = this.#pngDimensions(body, run)
           if (width === options.screenshotMaxWidth || height === options.screenshotMaxHeight) {
             this.log.info(`Screenshot reached its size limit (${width}x${height}); the page may extend beyond it.`)
           }
           const isEntryPoint = true
           const description = `Capture Time Screenshot of ${run.url}`
 
-          this.addGeneratedExchange(url, httpHeaders, body, isEntryPoint, description, run)
+          this.#addArtifact(url, httpHeaders, body, isEntryPoint, description, run)
         }
       })
     }
@@ -502,17 +524,20 @@ export class Scoop {
         name: 'DOM snapshot',
         alwaysRun: options.attachmentsBypassLimits,
         webPageOnly: true,
+        artifact: true,
         main: async (page) => {
           const url = 'file:///dom-snapshot.html'
           const httpHeaders = new Headers({
             'content-type': 'text/html',
             'content-disposition': 'Attachment'
           })
-          const body = Buffer.from(await this.#browserSnapshot(() => page.content(), 'DOM', run))
+          const body = Buffer.from(run === this
+            ? await this.#browserSnapshot(() => page.content(), 'DOM', run)
+            : await this.#pageSnapshot(() => page.content(), 'DOM', run, page))
           const isEntryPoint = true
           const description = `Capture Time DOM Snapshot of ${run.url}`
 
-          this.addGeneratedExchange(url, httpHeaders, body, isEntryPoint, description, run)
+          this.#addArtifact(url, httpHeaders, body, isEntryPoint, description, run)
         }
       })
     }
@@ -523,6 +548,7 @@ export class Scoop {
         name: 'PDF snapshot',
         alwaysRun: options.attachmentsBypassLimits,
         webPageOnly: true,
+        artifact: true,
         main: async (page) => {
           if (this.#browserClosedAfterSnapshotTimeout) return
           await this.#browserSnapshot(() => this.#takePdfSnapshot(page, run), 'PDF', run)
@@ -536,6 +562,7 @@ export class Scoop {
         name: 'Out-of-browser capture of video as attachment (if any)',
         alwaysRun: options.attachmentsBypassLimits,
         webPageOnly: true,
+        artifact: true,
         main: async () => {
           await this.#captureVideoAsAttachment(run)
         }
@@ -549,6 +576,7 @@ export class Scoop {
         global: true,
         alwaysRun: options.attachmentsBypassLimits,
         webPageOnly: false,
+        artifact: true,
         main: async () => {
           await this.#captureCertificatesAsAttachment()
         }
@@ -562,6 +590,7 @@ export class Scoop {
         global: true,
         alwaysRun: options.attachmentsBypassLimits,
         webPageOnly: false,
+        artifact: true,
         main: async (page) => {
           await this.#captureProvenanceInfo(page)
         }
@@ -612,9 +641,12 @@ export class Scoop {
   async #capturePages () {
     const storage = multipageState(this)
     const inventory = storage.data
+    // A page that failed for want of a required artifact, or on the deadline of a snapshot,
+    // was visited: what its visits recorded is kept, and worth exporting.
+    const retained = p => ['complete', 'partial'].includes(p.outcome) || (p.outcome === 'failed' && ['artifact_missing', 'snapshot_timeout'].includes(p.reason))
     const outcomeState = (sessionFailed = this.#sessionFailed) => {
       if (inventory.pages.every(p => p.outcome === 'complete') && !this.#recordingStop && !sessionFailed && !this.#tls.hasErrors) return Scoop.states.COMPLETE
-      if (inventory.pages.some(p => ['complete', 'partial'].includes(p.outcome))) return Scoop.states.PARTIAL
+      if (inventory.pages.some(retained)) return Scoop.states.PARTIAL
       return Scoop.states.FAILED
     }
     let setupFailed = false
@@ -636,84 +668,23 @@ export class Scoop {
           row.reason = setupFailed ? 'shared_setup_failed' : this.#recordingStop || 'session_failed'
           continue
         }
-        const run = {
-          id: row.id,
-          url: row.requestedUrl,
-          state: Scoop.states.CAPTURE,
-          reason: null,
-          targetUrlIsWebPage: true,
-          targetUrlContentType: 'text/html; charset=utf-8',
-          targetUrlResolved: row.requestedUrl,
-          pageInfo: {},
-          steps: [],
-          pages: new Set(),
-          active: true,
-          exchangeStart: this.intercepter.exchanges.length,
-          exchangeEnd: null,
-          helperFinished: false,
-          stepController: new AbortController()
-        }
-        this.#activeRun = run
-        row.startedAt = new Date().toISOString()
-        row.outcome = 'capturing'
-        let page
-        let unobserve
-        let scratch
-        try {
-          scratch = await createArtifactScratchDirectory(this.captureTmpFolderPath)
-          run.captureTmpFolderPath = scratch.path + '/'
-          page = await this.#context.newPage()
-          this.#tls.begin(run, page)
-          await page.setViewportSize({ width: this.options.captureWindowX, height: this.options.captureWindowY })
-          const session = await this.#context.newCDPSession(page)
-          await session.send('Network.enable')
-          await session.send('Network.setCacheDisabled', { cacheDisabled: true })
-          // Keep this session attached until page closure; detaching resets cache policy.
-          unobserve = observeNavigation(page, run, () => this.#recordingStop)
-          await this.#runSteps(this.#captureSteps(run).filter(step => !step.global), page, run)
-        } catch (error) {
-          run.state = Scoop.states.FAILED
-          run.reason = 'page_closed'
-          this.log.warn(`[${row.id}] Page attempt failed (${formatErrorMessage(error)}).`)
-          this.log.trace(error)
-        } finally {
-          run.stepController.abort()
-          // Disable admission before closing popups: closing a page can open another.
-          run.active = false
-          try {
-            for (const owned of run.pages) if (owned !== page) await owned.close()
-            await page?.close()
-            while (this.#closingPages.size) await Promise.all(this.#closingPages)
-            if ([...run.pages].some(owned => !owned.isClosed())) this.#sessionFailed = true
-          } catch (error) {
-            this.#sessionFailed = true
-            this.log.warn(`[${row.id}] Page cleanup failed (${formatErrorMessage(error)}).`)
-          }
-          unobserve?.()
-          this.#finishTlsRun(run)
-          run.exchangeEnd = this.intercepter.exchanges.length
-          const { chain, ...observation } = associateTarget(run, this.intercepter.exchanges)
-          Object.assign(row, observation)
-          storage.chains.set(row.id, chain)
-          if (run.state === Scoop.states.CAPTURE) run.state = Scoop.states.COMPLETE
-          row.outcome = Object.keys(Scoop.states).find(key => Scoop.states[key] === run.state).toLowerCase()
-          row.reason = row.outcome === 'complete' ? null : run.reason || 'session_failed'
-          row.pageInfo = JSON.parse(JSON.stringify({ ...run.pageInfo, favicon: undefined }))
-          row.attachments = artifactSummary(this.exchanges, row.id)
-          row.steps = run.steps
-          row.finishedAt = new Date().toISOString()
-          if (row.id === inventory.pages[0].id) {
-            this.targetUrlIsWebPage = run.targetUrlIsWebPage
-            this.targetUrlContentType = run.targetUrlContentType
-            this.targetUrlResolved = row.resolvedUrl || this.url
-            this.pageInfo = { ...run.pageInfo }
-          }
-          this.#activeRun = null
-          if (scratch) await removeArtifactScratchDirectory(scratch)
+        // One visit, and one more if the assessment of the first asks for it and nothing forbids it.
+        let run
+        do {
+          run = await this.#visitPage(row, row.attempts.length + 1, storage)
+        } while (await this.#assessAttempt(row, run))
+        // What the page entry says of itself is what its last visit says.
+        const last = row.attempts.at(-1)
+        for (const field of projectedFields) row[field] = last[field]
+        if (row.id === inventory.pages[0].id) {
+          this.targetUrlIsWebPage = run.targetUrlIsWebPage
+          this.targetUrlContentType = run.targetUrlContentType
+          this.targetUrlResolved = row.resolvedUrl || this.url
+          this.pageInfo = { ...run.pageInfo }
         }
       }
       inventory.finishedAt = new Date().toISOString()
-      validateInventory(inventory, this.exchanges, this.steps)
+      validateInventory(inventory, this.intercepter.exchanges.concat(this.exchanges), this.steps)
       const state = outcomeState()
       if (state !== Scoop.states.FAILED) {
         const global = {
@@ -721,7 +692,7 @@ export class Scoop {
           state: state === Scoop.states.COMPLETE ? Scoop.states.CAPTURE : state,
           reason: this.#recordingStop || inventory.pages.find(p => p.reason)?.reason || 'session_failed',
           targetUrlIsWebPage: false,
-          steps: [],
+          steps: inventory.globalSteps,
           stepController: new AbortController()
         }
         this.#activeRun = global
@@ -730,6 +701,8 @@ export class Scoop {
         global.active = false
         this.#tls.end(global)
         this.#activeRun = null
+        // The provenance step copied the inventory while it was still running.
+        if (this.provenanceInfo.multipage) this.provenanceInfo.multipage = this.multipage
       }
     } finally {
       const sessionFailed = this.#sessionFailed
@@ -745,6 +718,210 @@ export class Scoop {
         }
       }
     }
+  }
+
+  /**
+   * Makes one visit to a page of an array capture, on a page of its own, and records it
+   * as the next entry of the page's `attempts`.
+   * @returns {Promise<object>} The run of that visit, closed.
+   */
+  async #visitPage (row, attemptNumber, storage) {
+    const run = {
+      id: row.id,
+      attemptNumber,
+      prefix: artifactPrefix(row.id, attemptNumber),
+      url: row.requestedUrl,
+      state: Scoop.states.CAPTURE,
+      reason: null,
+      targetUrlIsWebPage: true,
+      targetUrlContentType: 'text/html; charset=utf-8',
+      targetUrlResolved: row.requestedUrl,
+      pageInfo: {},
+      steps: [],
+      pages: new Set(),
+      active: true,
+      exchangeStart: this.intercepter.exchanges.length,
+      exchangeEnd: null,
+      helperFinished: false,
+      stepController: new AbortController()
+    }
+    const attempt = {
+      pageId: row.id,
+      attemptNumber,
+      requestedUrl: row.requestedUrl,
+      resolvedUrl: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      outcome: 'capturing',
+      reason: null,
+      httpStatus: null,
+      contentType: null,
+      pageInfo: {},
+      entryPoint: null,
+      exchangeIds: [],
+      attachments: {},
+      steps: run.steps
+    }
+    // Published as it starts: an observer sees which visit is under way, and that it is one more.
+    row.attempts.push(attempt)
+    row.retryCount = attemptNumber - 1
+    for (const field of projectedFields) row[field] = attempt[field]
+    this.#activeRun = run
+    let page
+    let unobserve
+    let scratch
+    try {
+      scratch = await createArtifactScratchDirectory(this.captureTmpFolderPath)
+      run.captureTmpFolderPath = scratch.path + '/'
+      page = await this.#context.newPage()
+      this.#tls.begin(run, page)
+      await page.setViewportSize({ width: this.options.captureWindowX, height: this.options.captureWindowY })
+      const session = await this.#context.newCDPSession(page)
+      await session.send('Network.enable')
+      await session.send('Network.setCacheDisabled', { cacheDisabled: true })
+      // Keep this session attached until page closure; detaching resets cache policy.
+      unobserve = observeNavigation(page, run, () => this.#recordingStop)
+      await this.#runSteps(this.#captureSteps(run).filter(step => !step.global), page, run)
+    } catch (error) {
+      run.state = Scoop.states.FAILED
+      run.reason = 'page_closed'
+      this.log.warn(`[${row.id}] Page attempt failed (${formatErrorMessage(error)}).`)
+      this.log.trace(error)
+    } finally {
+      run.stepController.abort()
+      // Disable admission before closing popups: closing a page can open another.
+      run.active = false
+      try {
+        for (const owned of run.pages) if (owned !== page) await this.#closePage(owned)
+        if (page) await this.#closePage(page)
+        while (this.#closingPages.size) await Promise.all(this.#closingPages)
+        // A page that will not close within its bound is still doing work in the shared session.
+        if ((page && !page.isClosed()) || [...run.pages].some(owned => !owned.isClosed())) this.#sessionFailed = true
+      } catch (error) {
+        this.#sessionFailed = true
+        this.log.warn(`[${row.id}] Page cleanup failed (${formatErrorMessage(error)}).`)
+      }
+      unobserve?.()
+      run.blocked = this.#tls.blocked(run)
+      this.#finishTlsRun(run)
+      run.exchangeEnd = this.intercepter.exchanges.length
+      const { chain, ...observation } = associateTarget(run, this.intercepter.exchanges)
+      storage.chains.set(row.id, chain)
+      if (run.state === Scoop.states.CAPTURE) run.state = Scoop.states.COMPLETE
+      const outcome = Object.keys(Scoop.states).find(key => Scoop.states[key] === run.state).toLowerCase()
+      Object.assign(attempt, observation, {
+        outcome,
+        reason: outcome === 'complete' ? null : run.reason || 'session_failed',
+        pageInfo: JSON.parse(JSON.stringify({ ...run.pageInfo, favicon: undefined })),
+        // By identity, and only what is retained: an exchange that never carried a byte is not exported.
+        exchangeIds: this.intercepter.exchanges.slice(run.exchangeStart, run.exchangeEnd)
+          .filter(exchange => exchange.requestRaw?.length || exchange.responseRaw?.length)
+          .map(exchange => exchange.id),
+        attachments: artifactSummary(this.exchanges, row.id, attemptNumber),
+        finishedAt: new Date().toISOString()
+      })
+      this.#activeRun = null
+      if (scratch) await removeArtifactScratchDirectory(scratch)
+    }
+    return run
+  }
+
+  /**
+   * Has the visit just made to a page assessed, records what the assessment said, and tells
+   * whether the page is to be visited again.
+   *
+   * The page is visited again when its visit had nothing against it but required artifacts that
+   * are missing or invalid, the assessment allows it, it was the first visit, and the session is
+   * still running within its budget. Otherwise the visit keeps the outcome Scoop observed, or
+   * fails with `artifact_missing` when missing artifacts were all it had against it.
+   *
+   * @returns {Promise<boolean>}
+   */
+  async #assessAttempt (row, run) {
+    const attempt = row.attempts.at(-1)
+    const stopped = () => this.#recordingStop || this.#sessionFailed || performance.now() >= this.#deadline
+    // Once the session has stopped nothing new is admitted, an assessment no more than a visit.
+    if (stopped()) return false
+
+    const controller = this.#assessment = new AbortController()
+    let assessment
+    try {
+      assessment = validateAssessment(await Promise.race([
+        // A copy: nothing done to it reaches the inventory.
+        Promise.resolve().then(() => this.assessPageAttempt(structuredClone(attempt), controller.signal)),
+        new Promise((resolve, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true }))
+      ]))
+    } catch (error) {
+      if (controller.signal.aborted) {
+        // Stopped while it was assessed: a visit without its assessment is not a success.
+        if (attempt.outcome === 'complete') Object.assign(attempt, { outcome: 'partial', reason: this.#recordingStop || 'session_failed' })
+      } else {
+        // The capture can no longer tell what to do with its pages: it ends here, keeping what it has.
+        this.#sessionFailed = true
+        Object.assign(attempt, { outcome: 'failed', reason: 'session_failed' })
+        this.log.error(`[${row.id}] Assessment of visit ${attempt.attemptNumber} failed (${formatErrorMessage(error)}). Ending the session.`)
+        this.log.trace(error)
+      }
+      return false
+    } finally {
+      this.#assessment = null
+    }
+
+    Object.assign(attempt, assessment)
+    // Missing artifacts are the outcome of a visit only when nothing else is: not when Scoop
+    // itself saw it fail or stop short, get an HTTP error or have its target refused by policy.
+    const eligible = attempt.outcome === 'complete' && !(attempt.httpStatus >= 400) && !run.blocked
+    if (!eligible || !assessment.retryAllowed || !assessment.missingArtifacts.length) return false
+    Object.assign(attempt, { outcome: 'failed', reason: 'artifact_missing' })
+    if (attempt.attemptNumber >= MAX_ATTEMPTS || stopped()) return false
+    this.log.info(`[${row.id}] Required artifacts are missing (${assessment.missingArtifacts.join(', ')}): visiting the page once more.`)
+    return true
+  }
+
+  /**
+   * Closes a page, waiting no longer than `PAGE_CLOSE_TIMEOUT` for it.
+   * @returns {Promise<boolean>} Whether the page is closed.
+   */
+  async #closePage (page) {
+    let timer
+    await Promise.race([
+      page.close().catch(() => {}),
+      new Promise(resolve => { timer = setTimeout(resolve, PAGE_CLOSE_TIMEOUT) })
+    ])
+    clearTimeout(timer)
+    return page.isClosed()
+  }
+
+  /**
+   * Assesses a visit just made to a page of an array capture, to tell Scoop whether artifacts
+   * that the caller requires of it are missing. Meant to be overridden: as it comes, it requires
+   * nothing, so that no page is ever visited twice.
+   *
+   * Scoop awaits it after each visit it made, the second to a page included, once the pages of
+   * that visit are closed and what it recorded is final, and before going on to the next visit
+   * or page. It is not called for a page that was not visited, nor once the session has stopped.
+   *
+   * - `missingArtifacts` lists, without repeats, the required artifacts that the visit lacks or
+   *   that are not valid: Scoop knows that an artifact was generated, not that its bytes are good.
+   * - `retryAllowed` tells whether those artifacts are all that the visit has against it, in
+   *   the caller's eyes. Scoop still decides: it visits a page at most twice, never after a
+   *   visit that it saw fail, stop short, receive an HTTP error or have its target refused by
+   *   network policy, and never once the shared budget is spent or the session stopped.
+   *
+   * A visit that ends with missing artifacts and `retryAllowed` fails with `artifact_missing`
+   * if nothing else was against it, and if it was the first, the page is visited once more.
+   * With `retryAllowed: false` the visit keeps the outcome Scoop observed.
+   *
+   * Throwing, or returning anything else than the above, ends the session as failed: no page
+   * is visited after that, and what was captured is kept. `signal` aborts when the session
+   * stops while the assessment is pending; what it then returns is ignored.
+   *
+   * @param {Readonly<ScoopPageAttempt>} attempt - An independent copy of the visit's record. It references exchanges and attachments by id and name, without their bodies.
+   * @param {AbortSignal} signal
+   * @returns {Promise<{missingArtifacts: Array<'screenshot'|'domSnapshot'|'certificates'>, retryAllowed: boolean}>}
+   */
+  async assessPageAttempt (attempt, signal) { // eslint-disable-line no-unused-vars
+    return { missingArtifacts: [], retryAllowed: false }
   }
 
   async #runSteps (steps, page, run = this) {
@@ -773,14 +950,14 @@ export class Scoop {
       }
 
       // Page is a web document and is still "about:blank" after step #2
-      if (!primaryTlsFailure && page && run.targetUrlIsWebPage && i > 1 && page.url() === 'about:blank') {
+      if (!primaryTlsFailure && !run.terminal && page && run.targetUrlIsWebPage && i > 1 && page.url() === 'about:blank') {
         this.log.error('Navigation to page failed (about:blank).')
         if (run !== this) run.reason = 'navigation_error'
         shouldStop = true
       }
 
       // Page was closed
-      if (!primaryTlsFailure && page && run.targetUrlIsWebPage && page.isClosed() && !run.limitClosed && !this.#browserClosedAfterSnapshotTimeout) {
+      if (!primaryTlsFailure && !run.terminal && page && run.targetUrlIsWebPage && page.isClosed() && !run.limitClosed && !this.#browserClosedAfterSnapshotTimeout) {
         this.log.error('Page closed before it could be captured.')
         if (run !== this) run.reason = 'page_closed'
         shouldStop = true
@@ -788,7 +965,9 @@ export class Scoop {
 
       if (shouldStop) {
         run.state = Scoop.states.FAILED
-        break
+        if (run === this) break
+        // In array mode the steps that will not run are still recorded, with what stopped them.
+        run.terminal = true
       }
 
       //
@@ -800,13 +979,14 @@ export class Scoop {
       if (run !== this) {
         record.id = `step-${String(++this.#stepNumber).padStart(4, '0')}`
         record.pageId = run.id || null
+        record.attemptNumber = run.attemptNumber ?? null
         record.reason = null
         run.stepController = new AbortController()
       }
       let operation
       try {
         // Only if state is `CAPTURE`, unless `alwaysRun` is set for step
-        let shouldRun = (run.state === Scoop.states.CAPTURE || step.alwaysRun === true) && !(primaryTlsFailure && !step.global)
+        let shouldRun = (run.state === Scoop.states.CAPTURE || step.alwaysRun === true) && !(primaryTlsFailure && !step.global) && !run.terminal
 
         // BUT: `webPageOnly` takes precedence - allows for skipping unnecessary steps when capturing non-web content
         if (run.targetUrlIsWebPage === false && step.webPageOnly) {
@@ -837,6 +1017,7 @@ export class Scoop {
           })
         ])
         record.outcome = this.#tls.failed(run) ? 'failed' : interrupted ? 'interrupted' : 'completed'
+        if (run !== this && record.outcome === 'failed') record.reason = 'tls_validation_failed'
         if (interrupted && (run !== this || this.#tls.failed(run))) {
           run.stepController?.abort()
           if (this.#tls.failed(run)) {
@@ -872,6 +1053,7 @@ export class Scoop {
           this.log.warn(`${run === this ? '' : `[${run.id || 'capture'}] `}STEP [${i + 1}/${steps.length}]: ${step.name} - failed`)
           this.log.trace(err)
           record.outcome = 'failed'
+          if (run !== this) record.reason = this.#stepFailureReason(err, step, page, run)
         }
       } finally {
         clearInterval(stateCheckInterval)
@@ -881,6 +1063,53 @@ export class Scoop {
         if (run !== this) run.steps.push(structuredClone(record))
       }
     }
+  }
+
+  /**
+   * Why a step of an array capture failed, as one of a closed set of reasons.
+   *
+   * Goes by what is typed or observed, most specific first: a reason the step gave itself, the
+   * kind of error, the state of the browser and of the page. Never by how long the step took,
+   * and never by the text of an error, which stays in the logs. When none of those tells, the
+   * reason is what the step was for, or `step_failed`.
+   *
+   * @returns {string} See `stepFailureReasons`.
+   */
+  #stepFailureReason (err, step, page, run) {
+    if (this.#tls.failed(run)) return 'tls_validation_failed'
+    if (err instanceof StepFailure) return err.reason
+    if (err instanceof SnapshotTimeoutError) return 'snapshot_timeout'
+    if (this.#browser && !this.#browser.isConnected()) return 'browser_disconnected'
+    if (step.navigation && this.#tls.blocked(run)) return 'network_policy_blocked'
+    if (err instanceof playwrightErrors.TimeoutError) return 'step_timeout'
+    if (page?.isClosed()) return 'page_closed'
+    if (step.navigation) return 'navigation_error'
+    if (step.artifact) return 'artifact_generation_failed'
+    return 'step_failed'
+  }
+
+  /**
+   * The dimensions of a screenshot, which only PNG data has.
+   * In array mode, bytes that are not are recorded as what made the step fail.
+   * @returns {number[]} Width and height.
+   */
+  #pngDimensions (body, run) {
+    try {
+      return getDimensions(body)
+    } catch (err) {
+      throw run === this ? err : new StepFailure('artifact_invalid', { cause: err })
+    }
+  }
+
+  /**
+   * Adds the generated exchange that a step exists to produce.
+   * In array mode a step that could not add it has failed, whatever kept it out.
+   * @returns {boolean}
+   */
+  #addArtifact (url, headers, body, isEntryPoint, description, run) {
+    const added = this.addGeneratedExchange(url, headers, body, isEntryPoint, description, run)
+    if (!added && run !== this) throw new StepFailure('artifact_missing')
+    return added
   }
 
   /**
@@ -988,6 +1217,7 @@ export class Scoop {
 
     this.#browser.on('disconnected', () => {
       this.#sessionFailed = true
+      this.#assessment?.abort()
       clearTimeout(captureTimeoutTimer)
     })
 
@@ -1037,6 +1267,9 @@ export class Scoop {
      */
     let headRequestTimeMs = null
 
+    /** Whether the HEAD request was given up on because its own time ran out. */
+    let headRequestTimedOut = false
+
     //
     // Is `run.url` leading to a text/html resource?
     //
@@ -1052,7 +1285,7 @@ export class Scoop {
 
       timeout = this.#remaining(timeout)
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), timeout)
+      const timeoutId = setTimeout(() => { headRequestTimedOut = true; controller.abort() }, timeout)
       const policy = new NetworkPolicy(this.options.blocklist, (match, rule) => {
         this.provenanceInfo.blockedRequests.push({ match, rule })
       })
@@ -1077,7 +1310,13 @@ export class Scoop {
       if (this.#tls.record(err, { run, target: run.url, phase: 'head', primary: true })) throw err
       this.log.trace(err)
       this.log.warn('Resource type detection failed - skipping')
-      return
+      if (run === this) return
+      // Array mode records that the step failed, and why. The visit goes on to the browser as before.
+      if (err?.code === 'ERR_NETWORK_POLICY') {
+        this.#tls.block(run)
+        throw new StepFailure('network_policy_blocked', { cause: err })
+      }
+      throw new StepFailure(headRequestTimedOut ? 'step_timeout' : 'step_failed', { cause: err })
     }
 
     // A HEAD request that fails says nothing about what the browser's GET will
@@ -1177,6 +1416,7 @@ export class Scoop {
       if (run !== this) run.reason = this.#recordingStop || 'non_web_capture'
     } else {
       this.log.warn('Resource could not be captured')
+      if (run !== this) throw new StepFailure('step_failed')
     }
   }
 
@@ -1353,7 +1593,7 @@ export class Scoop {
           videoSaved = true
 
           // Push to map of available videos and subtitles
-          const index = (run === this ? '' : `${run.id}-`) + file.replace('.mp4', '')
+          const index = (run === this ? '' : run.prefix) + file.replace('.mp4', '')
 
           if (!(index in availableVideosAndSubtitles)) {
             availableVideosAndSubtitles[index] = []
@@ -1382,7 +1622,7 @@ export class Scoop {
           subtitlesSaved = true
 
           // Push to map of available videos and subtitles
-          const index = (run === this ? '' : `${run.id}-`) + file.replace('.vtt', '').replace(`.${locale}`, '')
+          const index = (run === this ? '' : run.prefix) + file.replace('.vtt', '').replace(`.${locale}`, '')
 
           if (!(index in availableVideosAndSubtitles)) {
             availableVideosAndSubtitles[index] = []
@@ -1444,7 +1684,7 @@ export class Scoop {
         now: new Date().toISOString(),
         videoSaved,
         metadataSaved,
-        metadataFilename: run === this ? 'video-extracted-metadata.json' : `${run.id}-video-extracted-metadata.json`,
+        metadataFilename: run === this ? 'video-extracted-metadata.json' : `${run.prefix}video-extracted-metadata.json`,
         subtitlesSaved,
         availableVideosAndSubtitles,
         metadataParsed: metadataParsed.map(entry => {
@@ -1474,6 +1714,30 @@ export class Scoop {
       if (run !== this) run.reason = this.#recordingStop || 'snapshot_timeout'
       this.log.warn(`${name} snapshot exceeded 10 seconds; closing browser and preserving the partial capture.`)
       await this.#browser.close()
+    })
+  }
+
+  /**
+   * Bound a snapshot of one page of an array capture. Past its deadline the visit to that
+   * page fails with `snapshot_timeout`, its page is closed, and the session goes on: the
+   * browser and its context are left to the pages that follow.
+   *
+   * Closing the page is what ends the work it was doing, and is itself bounded. A page that
+   * does not close is a failure of the shared session, which then stops.
+   */
+  async #pageSnapshot (operation, name, run, page) {
+    return await withSnapshotDeadline(operation, async () => {
+      // A stop of the whole capture that came first remains the cause.
+      if (!this.#recordingStop) {
+        run.state = Scoop.states.FAILED
+        run.reason = 'snapshot_timeout'
+      }
+      run.terminal = true
+      this.log.warn(`[${run.id}] ${name} snapshot exceeded 10 seconds; closing its page and moving on.`)
+      if (!await this.#closePage(page)) {
+        this.#sessionFailed = true
+        this.log.error(`[${run.id}] The page did not close after its ${name} snapshot timed out. Ending the session.`)
+      }
     })
   }
 
@@ -1510,7 +1774,7 @@ export class Scoop {
     const isEntryPoint = true
     const description = `Capture Time PDF Snapshot of ${run.url}`
 
-    this.addGeneratedExchange(url, httpHeaders, body, isEntryPoint, description, run)
+    this.#addArtifact(url, httpHeaders, body, isEntryPoint, description, run)
   }
 
   /**
@@ -1586,7 +1850,8 @@ export class Scoop {
         }
       })
     } catch (err) {
-      throw new Error('Capture certificates at attachment timeout reached', { cause: err })
+      // The only thing the loop above rejects with is its time budget running out.
+      throw new StepFailure('step_timeout', { cause: err }, 'Capture certificates at attachment timeout reached')
     }
   }
 
@@ -1737,6 +2002,7 @@ export class Scoop {
    * @param {Buffer} body
    * @param {boolean} [isEntryPoint=false]
    * @param {string} [description='']
+   * @param {object} [run] - In array mode, the visit that generated it: `id` is its page, `url` the requested URL and `attemptNumber` the visit, from 1. The exchange added, last of `exchanges` when this returns true, carries them as `pageId`, `sourceUrl` and `attemptNumber`, and is named after them: `page-0001-screenshot.png`, then `page-0001-attempt-2-screenshot.png`.
    * @returns {boolean} true if generated exchange is successfully added
    */
   addGeneratedExchange (url, headers, body, isEntryPoint = false, description = '', run = this) {
@@ -1749,7 +2015,7 @@ export class Scoop {
         this.stopRecording('capture_size_limit')
         return false
       }
-      if (run !== this && run.id) url = `file:///${run.id}-${url.slice(8)}`
+      if (run !== this && run.id) url = `file:///${run.prefix ?? artifactPrefix(run.id)}${url.slice(8)}`
       this.#generatedBytes += body.byteLength
     } else {
       // Check maxCaptureSize and capture state unless `attachmentsBypassLimits` flag was raised.
@@ -1767,7 +2033,7 @@ export class Scoop {
     this.exchanges.push(
       new ScoopGeneratedExchange({
         url,
-        ...(run !== this && run.id ? { pageId: run.id, sourceUrl: run.url } : {}),
+        ...(run !== this && run.id ? { pageId: run.id, sourceUrl: run.url, attemptNumber: run.attemptNumber ?? 1 } : {}),
         description,
         isEntryPoint: Boolean(isEntryPoint),
         response: {

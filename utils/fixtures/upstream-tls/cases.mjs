@@ -152,7 +152,7 @@ for (const array of [false, true]) {
     if (array) {
       assert.equal(capture.multipage.pages[0].outcome, 'partial')
       assert.equal(capture.multipage.pages[0].reason, 'tls_validation_failed')
-      assert.equal(capture.multipage.version, 2)
+      assert.equal(capture.multipage.version, 3)
     }
     const records = []
     for await (const record of new WARCParser([await capture.toWARC()])) {
@@ -250,6 +250,29 @@ test('valid A, TLS-failed B and valid C preserve page outcomes and continue the 
   const restored = await Scoop.fromWACZ(path)
   assert.deepEqual(restored.multipage, capture.multipage)
   assert.deepEqual(restored.errors, capture.errors)
+})
+
+test('a certificate failure is not grounds for a second visit, whatever the assessment says', async t => {
+  const good = await fixture(t)
+  const bad = await fixture(t, 'expired')
+  const secondary = await fixture(t, 'valid', (request, response) => {
+    const body = `<!doctype html><title>Secondary</title><link rel="icon" href="data:,"><img src="${bad.base}/image.png">`
+    response.writeHead(200, { 'content-type': 'text/html', 'content-length': Buffer.byteLength(body) })
+    response.end(request.method === 'HEAD' ? undefined : body); return true
+  })
+  // No screenshot is taken: every visit lacks the artifact this capture requires.
+  class Requiring extends Scoop {
+    async assessPageAttempt () { return { missingArtifacts: ['screenshot'], retryAllowed: true } }
+  }
+  const capture = new Requiring([bad.base + '/a', secondary.base + '/b', good.base + '/c'], options)
+  await capture.capture()
+  const pages = capture.multipage.pages
+  // Rejected on the way to the target, rejected for a resource of the page, and not at all.
+  assert.deepEqual(pages.map(page => [page.outcome, page.reason, page.attempts.length]), [['failed', 'tls_validation_failed', 1], ['partial', 'tls_validation_failed', 1], ['failed', 'artifact_missing', 2]])
+  assert.deepEqual(pages[0].steps[0].reason, 'tls_validation_failed')
+  assert.deepEqual(pages.slice(0, 2).map(page => page.attempts[0].retryAllowed), [true, true])
+  assert.equal(good.hits.filter(hit => hit.method === 'GET' && hit.path === '/c').length, 2)
+  assert.equal(bad.hits.length, 0)
 })
 
 test('all TLS-failed targets produce FAILED and a valid diagnostic summary', async t => {

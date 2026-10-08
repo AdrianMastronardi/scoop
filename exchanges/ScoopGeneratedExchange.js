@@ -29,4 +29,7 @@ export class ScoopGeneratedExchange extends ScoopExchange {
 
   /** @type {?string} Requested page URL; never an origin HTTP header. */
   sourceUrl
+
+  /** @type {?number} Which visit to the owning page generated it, from 1; absent before inventory version 3. */
+  attemptNumber
 }

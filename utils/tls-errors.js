@@ -109,6 +109,17 @@ export class CaptureTlsErrors {
   partial (run) { return this.#runs.get(run)?.partial === true }
   helper (run, active) { this.#runs.get(run).helper = active }
 
+  /** Whether network policy refused the run's own target, on the way to it or through a redirect. */
+  blocked (run) { return this.#runs.get(run)?.blocked === true }
+  block (run) { const scope = this.#runs.get(run); if (scope?.open) scope.blocked = true }
+
+  /** Called with every proxy error: a policy refusal of an admitted primary request marks its run. */
+  policyError (error, request) {
+    if (error?.code !== 'ERR_NETWORK_POLICY') return
+    const owner = request && this.#requests.get(request)
+    if (owner?.primary) this.block(owner.run)
+  }
+
   /** Browser evidence disambiguates navigation; CONNECT authority alone cannot. */
   observe (context) {
     const onRequest = request => {

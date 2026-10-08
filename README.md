@@ -278,23 +278,58 @@ All targets share one Chromium context, cookies, localStorage and IndexedDB acco
 
 `captureTimeout` (default 60 seconds) and `maxCaptureSize` cover the **entire list**, including auxiliary traffic. Increase the timeout for longer lists; 180 seconds above is a whole-capture budget. `loadTimeout`, `networkIdleTimeout` and behavior timeouts apply within each page's remaining budget. Eligible attachment work can exceed capture limits when `attachmentsBypassLimits` is true; it never authorizes starting another target. With that option false, generated artifact bodies consume the cumulative size budget too. These limits do not bound total process RAM.
 
-Inspect `summary.multipage.pages`: each input has a stable `page-0001` ID, requested and observed URLs, timestamps, outcome (`complete`, `partial`, `failed`, `skipped`), reason, observed HTTP status/type, replay entry, attachments and steps. This inventory preserves input order independently of the viewer's page menu. Public inventory values are independent snapshots. Top-level URL, page information and page attachments project the first target; provenance and certificates are global. Page artifacts have distinct names such as `page-0002-screenshot.png` and WARC source fields `Scoop-Page-ID` / `Scoop-Source-URL`.
+Inspect `summary.multipage.pages`: each input has a stable `page-0001` ID, requested and observed URLs, timestamps, outcome (`complete`, `partial`, `failed`, `skipped`), reason, observed HTTP status/type, replay entry, attachments, steps and the visits made to it. This inventory preserves input order independently of the viewer's page menu. Public inventory values are independent snapshots. Top-level URL, page information and page attachments project the first target; provenance and certificates are global. Page artifacts have distinct names such as `page-0002-screenshot.png` and WARC source fields `Scoop-Page-ID` / `Scoop-Source-URL`.
 
-Page outcomes retain Scoop's existing behavior. Ordinary screenshot, PDF, video or provenance errors are recorded without independently lowering completion. A recorded 404/500 can still be complete; a synthetic proxy error or unfinished redirect has no replay entry. Non-web captures remain partial. Individual page failures allow later attempts; a shared limit or lost session skips remaining targets. The capture is COMPLETE only when every page is complete, PARTIAL when some useful complete/partial results remain, and FAILED otherwise. CLI exit 0 means an archive was written, including partial captures; inspect the summary for coverage. FAILED exits 1 and still writes a requested JSON summary.
+Page outcomes retain Scoop's existing behavior. Ordinary screenshot, PDF, video or provenance errors are recorded without independently lowering completion. A recorded 404/500 can still be complete; a synthetic proxy error or unfinished redirect has no replay entry. Non-web captures remain partial. Individual page failures allow later attempts, including a DOM snapshot that exceeds its 10 seconds: that page fails with `snapshot_timeout`, its browser page alone is closed, and the next target is visited. A shared limit or lost session skips remaining targets, as does a page that will not close within 5 seconds of such a deadline. A PDF snapshot past its deadline still closes the browser. The capture is COMPLETE only when every page is complete, PARTIAL when some useful complete/partial results remain or a page failed with `artifact_missing` or `snapshot_timeout`, whose visits are kept, and FAILED otherwise. CLI exit 0 means an archive was written, including partial captures; inspect the summary for coverage. FAILED exits 1 and still writes a requested JSON summary.
 
 A string keeps the existing single-page behavior. An array of **one URL** explicitly selects array mode; exactly one CLI argument selects string mode. Array mode additionally:
 
 - Uses strict input validation, blocks service workers and bypasses the HTTP cache on primary pages. Popup cache bypass is best-effort and may lose the race with its first requests.
 - Prevents helpers from resuming recording after a shared limit, and gets the first resolved URL from recorded navigation instead of the preliminary HEAD probe.
 - Prefixes page artifact names and uses the source fields above instead of `WARC-Refers-To-Target-URI` for generated page artifacts.
-- Adds `id`, `pageId` and `reason` to step records and includes versioned `multipage` metadata in summaries and WACZ `datapackage.json` extras.
+- Adds `id`, `pageId`, `attemptNumber` and `reason` to step records and includes versioned `multipage` metadata in summaries and WACZ `datapackage.json` extras.
+- Records every step that was planned for a page: the ones that a failed visit never got to are `skipped`, with the reason of that failure. A step that caught its own error is recorded as failed, not as completed, and the visit goes on as it did.
 - Fails export if a retained record cannot be serialized. String mode retains its logged omission behavior unless payload deduplication is enabled.
 
 Upstream HTTPS certificates are always verified, including HEAD probes, redirects and downloads through the proxy. A certificate failure on the target ends that attempt as failed; a rejected secondary resource leaves an otherwise complete attempt partial while retaining valid content and snapshots. In array mode, later targets can still run within the shared budget. This also applies to a URL string.
 
 Inspect `capture.errors` or `(await capture.summary()).errors` for independent snapshots of the original certificate code/message, validation phase, destination and owning page. The array is present even with logging and provenance disabled. A CONNECT failure can expose only hostname/port, with `url: null`; unowned errors have `pageId: null`. WACZ stores these diagnostics in `datapackage.json` under `extras.captureErrors`; reconstruction validates them without changing TLS policy. Older archives without the field restore `[]`. A failed capture cannot be exported; the CLI writes its requested JSON summary and exits 1. A partial capture remains exportable and a successful CLI export exits 0.
 
-New array captures use inventory version 2, adding the `tls_validation_failed` reason. Version 1 archives remain readable with their original reason vocabulary.
+New array captures use inventory version 3, described below. Version 2 added the `tls_validation_failed` reason to version 1. Archives of both remain readable, each by the rules it was written under: one visit per page, and no reason for a failed step. A reader older than version 3 rejects a version 3 archive.
+
+### Required artifacts and a second visit
+
+A page of an array capture can be visited a second time when its first visit ended without an artifact that the caller requires. Scoop knows that an artifact was generated, not whether its caller needs it nor whether its bytes are good. It asks, by awaiting `assessPageAttempt()` after each visit. As it comes, that method requires nothing, and no page is visited twice. Override it in a subclass:
+
+```javascript
+import { Scoop } from '@harvard-lil/scoop'
+
+class RequiringScoop extends Scoop {
+  async assessPageAttempt (attempt, signal) {
+    const name = attempt.attachments.screenshot
+    const screenshot = this.exchanges.find(exchange => exchange.url === `file:///${name}`)
+    return {
+      missingArtifacts: screenshot?.response.body.length ? [] : ['screenshot'],
+      retryAllowed: true
+    }
+  }
+}
+
+const capture = new RequiringScoop(['https://example.com/', 'https://example.com/terms'])
+await capture.capture()
+```
+
+- `attempt` is an independent copy of the visit's record: its outcome, steps, the ids of its exchanges and the names of its attachments, without their bodies. `missingArtifacts` lists what the visit lacks, or has with invalid bytes, among `screenshot`, `domSnapshot` and `certificates`. Certificates are collected once every page has been visited, so Scoop has none to show at this point. `retryAllowed` tells whether those artifacts are all that the caller holds against the visit.
+- The page is visited once more, at once, when the first visit completed, the assessment lists missing artifacts and allows it, and the session is still running within its shared time and size budgets, which both visits spend. The second visit opens a new page in the same browser context and starts from the requested URL, with whatever cookies and storage the first one left.
+- Scoop never grants more than those two visits, and none after a visit that failed or stopped short, that got an HTTP status of 400 or more, whose target the blocklist refused or whose certificates were rejected, whatever the assessment says. A visit that lacks required artifacts and has nothing else against it fails with `artifact_missing`. With `retryAllowed: false` it keeps the outcome Scoop observed, and the assessment is recorded.
+- An assessment that throws, or returns anything else, ends the session: the visit fails with `session_failed`, remaining targets are skipped, and what was captured is kept. `signal` aborts if the session stops while the assessment is pending, which then decides nothing: a visit that had completed is recorded as partial, with the reason of the stop.
+- The method belongs to the capturing process. It is not stored in the archive, and importing a WACZ runs nothing of it.
+
+Each page lists its visits under `attempts`, in order, and counts the second in `retryCount`. Everything else the page says of itself repeats its last visit, even if that one fared worse than the first. A visit records its own URLs, status, entry point, steps, `exchangeIds` and attachments, and what its assessment said as `missingArtifacts` and `retryAllowed`. A visit that was not assessed has neither, which is not a favorable assessment. While a page is being captured, including while a visit is assessed, its `outcome` is `capturing` and its `finishedAt` is null, and the visit under way is the last of `attempts`.
+
+The evidence of both visits is kept, and never mixed. Attachments of a second visit have names of their own, such as `page-0001-attempt-2-screenshot.png`, the same `Scoop-Page-ID` and `Scoop-Source-URL` in the WARC, and a `Scoop-Attempt-Number`. `addGeneratedExchange()` is given the visit as its `run` argument, and the exchange it adds carries `pageId`, `sourceUrl` and `attemptNumber`. `pages/pages.jsonl` keeps one entry per requested URL, with the entry point of its last visit. `Scoop.fromWACZ()` restores the history without visiting anything.
+
+`capture.steps` has the steps of every visit, then the global ones, which the inventory also lists as `globalSteps`. A completed step has no reason. A failed step has one of a closed list: `step_timeout`, `snapshot_timeout`, `navigation_error`, `page_closed`, `browser_disconnected`, `tls_validation_failed`, `network_policy_blocked`, `artifact_missing`, `artifact_invalid`, `artifact_generation_failed` or `step_failed`. It comes from the kind of error and the state of the browser, never from the text of an error nor from how long the step took: a screenshot that exceeds its 5 seconds is a `step_timeout`, one that throws anything else an `artifact_generation_failed`. The reason of a step is not the reason of its page: a page whose screenshot failed is complete unless something requires that screenshot.
 
 The page inventory is finalized before global certificate/provenance work. Its end timestamp describes page work, not signing/export or the end of the global step trace. It is retained even when `provenanceSummary` is false. `Scoop.fromWACZ()` restores validated inventory and artifact associations from raw-enabled archives without applying archived options or making network requests. Raw-free WACZs support replay, not reconstruction. Reconstructed captures can export WARC; WACZ re-export remains unsupported.
 

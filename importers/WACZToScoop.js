@@ -1,5 +1,5 @@
 import path from 'path'
-import { restoreMultipage } from '../utils/multipage.js'
+import { restoreMultipage, inventorySteps } from '../utils/multipage.js'
 import { URL } from 'url'
 import { createServer, request } from 'http'
 import { Readable, PassThrough } from 'node:stream'
@@ -37,7 +37,7 @@ export async function WACZToScoop (zipPath) {
     const datapackage = await getDataPackage(zip)
     const inventory = datapackage?.extras?.multipage
     const hasInventory = Object.hasOwn(datapackage.extras || {}, 'multipage')
-    if (hasInventory && (!inventory || ![1, 2].includes(inventory.version) || !Array.isArray(inventory.urls) || !inventory.urls.length)) throw new Error('Unsupported or invalid multipage archive')
+    if (hasInventory && (!inventory || ![1, 2, 3].includes(inventory.version) || !Array.isArray(inventory.urls) || !inventory.urls.length)) throw new Error('Unsupported or invalid multipage archive')
     // Archived options remain descriptive data, never runtime instructions.
     const capture = Scoop.fromArchive(hasInventory ? inventory.urls[0] : datapackage.mainPageUrl)
     Object.assign(capture, {
@@ -49,7 +49,7 @@ export async function WACZToScoop (zipPath) {
       restoreMultipage(capture, inventory)
       capture.targetUrlResolved = inventory.pages[0].resolvedUrl || capture.url
       capture.pageInfo = structuredClone(inventory.pages[0].pageInfo)
-      capture.steps = inventory.pages.flatMap(page => page.steps).sort((a, b) => Number(a.id.slice(5)) - Number(b.id.slice(5)))
+      capture.steps = inventorySteps(capture.multipage)
     }
     capture.restoreCaptureErrors(Object.hasOwn(datapackage.extras || {}, 'captureErrors') ? datapackage.extras.captureErrors : [])
     if (datapackage?.extras?.provenanceInfo) capture.provenanceInfo = datapackage.extras.provenanceInfo
@@ -117,7 +117,9 @@ const getExchanges = async (zip, multipage = false) => {
           ...(multipage
             ? {
                 pageId: record.warcHeader('Scoop-Page-ID') || undefined,
-                sourceUrl: record.warcHeader('Scoop-Source-URL') || undefined
+                sourceUrl: record.warcHeader('Scoop-Source-URL') || undefined,
+                // Absent from archives older than inventory version 3.
+                ...(record.warcHeader('Scoop-Attempt-Number') ? { attemptNumber: Number(record.warcHeader('Scoop-Attempt-Number')) } : {})
               }
             : {}),
           response: {

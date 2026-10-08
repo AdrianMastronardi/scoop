@@ -4,6 +4,9 @@
 
 ### Compatibility notes
 
+- **Inventory version 3 for array captures.** Pages list the visits made to them under `attempts`, steps carry an `attemptNumber`, a failed step has a reason from a closed list where it had `null`, and global steps are listed as `globalSteps`. Steps that a failed visit never got to are recorded as `skipped`, and a step that caught its own error as `failed`. Versions 1 and 2 remain readable by their own rules; readers older than this version reject version 3.
+- **A DOM snapshot past its deadline no longer ends an array capture.** That page fails with `snapshot_timeout`, where it was partial, only its browser page is closed, and later targets are visited, where they were skipped. String captures and the PDF snapshot keep closing the browser.
+
 - **Upstream TLS certificates are verified.** Invalid target certificates now fail the attempt without HEAD-to-GET fallback; invalid secondary resources leave valid content exportable as partial. String and array captures expose independent `errors` snapshots, also stored as WACZ `extras.captureErrors`. New multipage inventories use version 2 with `tls_validation_failed`; version 1 and archives without diagnostics remain readable.
 
 - **Array captures are opt-in.** A URL string and one CLI URL retain single-page behavior. Arrays (including one-element arrays) use strict URL validation, shared session/time/size budgets, blocked service workers, primary-page cache bypass, per-page artifact names and strict archive serialization. CLI exit 0 can represent partial coverage; inspect the page inventory.
@@ -17,6 +20,7 @@
 
 - Capture an explicit ordered URL list with `Scoop.capture(urls, options)` or multiple CLI URLs. The archive includes versioned per-page outcomes, recorded navigation entries and source-associated artifacts; raw-enabled reconstruction restores this metadata.
 - Optional `deduplicatePayloads` / `--deduplicate-payloads` stores eligible identical WARC response payloads using direct revisit references. Disabled by default; preserves observation headers, all network requests and full raw exchanges.
+- An array capture can visit a page a second time when its first visit lacks artifacts that the caller requires. Override `assessPageAttempt()` to say which are missing or invalid; as it comes it requires nothing. Both visits are kept, with their own exchanges, attachments and steps, and the page ends as its last visit did, or with `artifact_missing`. See "Required artifacts and a second visit" in the README.
 
 - `screenshotMaxWidth` and `screenshotMaxHeight` (`--screenshot-max-width`, `--screenshot-max-height`) clip the full-page screenshot to the top left of the page. The default, `0`, leaves it unbounded. Unbounded, a very tall page can take the browser several gigabytes to render; clipped at 16,000 pixels high, pages that had exhausted a 5 GiB memory limit peaked at about 1.4 GB.
 - The capture summary has a `steps` list: each step's name, start time, duration, and outcome (`completed`, `failed`, `limit`, `interrupted`, or `skipped`).

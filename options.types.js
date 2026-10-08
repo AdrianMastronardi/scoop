@@ -62,18 +62,21 @@
  */
 
 /**
- * Descriptive page inventory; new captures use version 2, version 1 remains readable. Public getters return independent copies.
+ * Descriptive page inventory. New captures use version 3, which adds the history of visits to each page, closed reasons for failed steps and the global steps. Versions 1 and 2 remain readable, by the rules they were written under. Public getters return independent copies.
  * Page work ends before global certificate/provenance steps and export/signing.
  * @typedef {Object} ScoopMultipage
- * @property {1|2} version
+ * @property {1|2|3} version
  * @property {?string} startedAt - UTC capture start; null before setup.
  * @property {?string} finishedAt - UTC end of page work; null while active.
  * @property {string[]} urls - Validated, ordered requested URLs.
+ * @property {ScoopMultipageStep[]} globalSteps - Steps that belong to no page, in order. From version 3.
  * @property {ScoopPageResult[]} pages
  */
 
 /**
  * One explicitly requested target, including failed and skipped targets.
+ * From version 3 on, everything below `requestedUrl` and above `attempts` repeats the last visit made to the page: its history is in `attempts`.
+ * While the page is being captured, including while a visit is assessed, `outcome` is `capturing` and `finishedAt` is null.
  * @typedef {Object} ScoopPageResult
  * @property {string} id - Stable page-0001-style identifier.
  * @property {string} requestedUrl
@@ -81,13 +84,38 @@
  * @property {?string} startedAt
  * @property {?string} finishedAt
  * @property {'pending'|'capturing'|'complete'|'partial'|'failed'|'skipped'} outcome
- * @property {?string} reason - Machine-readable cause; null for complete results.
+ * @property {?string} reason - Machine-readable cause; null for complete results. From version 3, `artifact_missing` when the last visit lacked required artifacts and nothing else.
  * @property {?number} httpStatus - Observation, not a success criterion.
  * @property {?string} contentType
  * @property {Object} pageInfo - Page metadata without the favicon buffer.
  * @property {?{url: string, ts: string}} entryPoint - Requested URL and first recorded navigation timestamp.
  * @property {Object<string, string|string[]>} attachments - Safe generated filenames.
  * @property {ScoopMultipageStep[]} steps
+ * @property {ScoopPageAttempt[]} attempts - The visits made to the page, in order: none if it was skipped, two if it was visited again. From version 3.
+ * @property {0|1} retryCount - How many visits were started after the first. From version 3.
+ */
+
+/**
+ * One visit to a page of an array capture, as recorded in `attempts` and as given to `Scoop.assessPageAttempt`.
+ * It describes the visit and references its evidence, without holding any body.
+ * @typedef {Object} ScoopPageAttempt
+ * @property {string} pageId
+ * @property {1|2} attemptNumber
+ * @property {string} requestedUrl - Every visit starts from it.
+ * @property {?string} resolvedUrl
+ * @property {string} startedAt
+ * @property {?string} finishedAt - Null while the visit is under way.
+ * @property {'capturing'|'complete'|'partial'|'failed'} outcome
+ * @property {?string} reason
+ * @property {?number} httpStatus
+ * @property {?string} contentType
+ * @property {Object} pageInfo
+ * @property {?{url: string, ts: string}} entryPoint
+ * @property {string[]} exchangeIds - `id` of the intercepted exchanges admitted during the visit and retained.
+ * @property {Object<string, string|string[]>} attachments - Filenames of what the visit generated: `page-0001-screenshot.png` for a first visit, `page-0001-attempt-2-screenshot.png` for a second.
+ * @property {ScoopMultipageStep[]} steps
+ * @property {Array<'screenshot'|'domSnapshot'|'certificates'>} [missingArtifacts] - What the assessment of the visit reported. Absent if it was not assessed, which is not a favorable assessment.
+ * @property {boolean} [retryAllowed] - Present with `missingArtifacts`.
  */
 
 /**
@@ -95,9 +123,10 @@
  * @typedef {Object} ScoopMultipageStep
  * @property {string} id - Capture-wide step-0001-style identifier.
  * @property {?string} pageId - Null for global certificate/provenance work.
+ * @property {?number} attemptNumber - The visit to its page that the step ran in; null for global steps. From version 3.
  * @property {string} name
  * @property {string} startedAt - UTC timestamp.
  * @property {number} durationMs
  * @property {'completed'|'failed'|'limit'|'interrupted'|'skipped'} outcome
- * @property {?string} reason
+ * @property {?string} reason - Null for a completed step. From version 3 a failed step has one of `step_timeout`, `snapshot_timeout`, `navigation_error`, `page_closed`, `browser_disconnected`, `tls_validation_failed`, `network_policy_blocked`, `artifact_missing`, `artifact_invalid`, `artifact_generation_failed` or `step_failed`: what is typed or observed, never the text of an error nor a guess from its duration. A step that did not run, or ended on a limit, has the reason of what stopped it.
  */

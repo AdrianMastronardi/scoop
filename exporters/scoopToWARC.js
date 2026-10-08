@@ -96,6 +96,7 @@ export async function serializeWARC (capture, gzip = false) {
             if (exchange.pageId) {
               warcHeaders['Scoop-Page-ID'] = exchange.pageId
               warcHeaders['Scoop-Source-URL'] = exchange.sourceUrl
+              if (exchange.attemptNumber != null) warcHeaders['Scoop-Attempt-Number'] = String(exchange.attemptNumber)
             }
           } else warcHeaders['WARC-Refers-To-Target-URI'] = capture.url
         }
